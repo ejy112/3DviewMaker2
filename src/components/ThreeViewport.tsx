@@ -328,6 +328,59 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       })
     );
 
+    // "Normal Map High-Color" LookDev material. Standard normal-encoding (normal*0.5+0.5, as
+    // THREE.MeshNormalMaterial does it) inherently looks pastel/washed out on any mostly-flat
+    // surface: a forward-facing normal encodes to (0.5, 0.5, 1.0), a pale lavender-blue, since
+    // the X/Y channels sit at their neutral midpoint. Boosting HSV saturation after that encode
+    // — rather than changing the encoding itself — keeps it recognizable as a normal map while
+    // making both the flat-area base color and the curved-edge color transitions much more vivid.
+    const vividNormalMaterialRef = useRef<THREE.ShaderMaterial>(
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uSaturationBoost: { value: 2.4 },
+        },
+        vertexShader: `
+          varying vec3 vNormal;
+
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uSaturationBoost;
+          varying vec3 vNormal;
+
+          vec3 rgb2hsv(vec3 c) {
+            vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+            vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+            vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+            float d = q.x - min(q.w, q.y);
+            float e = 1.0e-10;
+            return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+          }
+
+          vec3 hsv2rgb(vec3 c) {
+            vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+            vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+            return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+          }
+
+          void main() {
+            vec3 norm = normalize(vNormal);
+            if (!gl_FrontFacing) norm = -norm;
+            vec3 baseColor = norm * 0.5 + 0.5;
+
+            vec3 hsv = rgb2hsv(baseColor);
+            hsv.y = clamp(hsv.y * uSaturationBoost, 0.0, 1.0);
+            gl_FragColor = vec4(hsv2rgb(hsv), 1.0);
+          }
+        `,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      })
+    );
+
     // Volume / watertightness (unscaled — multiplied by scaleFactor^3 on demand)
     const unscaledVolumeCm3Ref = useRef<number>(0);
     const isWatertightRef = useRef<boolean>(true);
@@ -416,14 +469,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const materialsMap = useRef<{
       grey: THREE.MeshStandardMaterial;
       custom: THREE.MeshStandardMaterial;
-      normal: THREE.MeshNormalMaterial;
+      normal: THREE.ShaderMaterial;
       wireframe: THREE.MeshBasicMaterial;
       sketch: THREE.ShaderMaterial;
       matcapZebra: THREE.MeshMatcapMaterial;
     }>({
       grey: new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.5, metalness: 0.1 }),
       custom: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.95, metalness: 0.0 }),
-      normal: new THREE.MeshNormalMaterial({ flatShading: false }),
+      normal: vividNormalMaterialRef.current,
       wireframe: new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true }),
       sketch: sketchMaterialRef.current,
       matcapZebra: new THREE.MeshMatcapMaterial({ color: 0xffffff }),
@@ -3318,24 +3371,19 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
               )}
             </div>
 
-            {/* Contrast — always "active" (100% = neutral), so a click just snaps between 100%
-                and 250%; the slider inside dials in anything else. */}
+            {/* Contrast — like Exploded View, the panel's open/closed state is independent of
+                the slider value: clicking the icon just opens/closes the panel, so dragging back
+                to 100% (or anywhere else) never closes it out from under you and never resets
+                the value on its own. Only the panel's own X, or clicking the icon again, closes
+                it, and the last value dragged to is always what's kept. */}
             <div className="flex flex-col items-end gap-2">
               <button
-                onClick={() => {
-                  if (settings.contrastPercent !== 100) {
-                    onUpdateSettings({ contrastPercent: 100 });
-                    setOpenRailPanel(null);
-                  } else {
-                    onUpdateSettings({ contrastPercent: 250 });
-                    setOpenRailPanel('contrast');
-                  }
-                }}
-                className={railBtnClass(settings.contrastPercent !== 100)}
+                onClick={() => setOpenRailPanel(openRailPanel === 'contrast' ? null : 'contrast')}
+                className={railBtnClass(settings.contrastPercent !== 100 || openRailPanel === 'contrast')}
                 title={
                   settings.contrastPercent !== 100
-                    ? 'Contrast: boosted (click to reset to 100%)'
-                    : 'Contrast: 100% (click to boost to 250%)'
+                    ? `Contrast: ${settings.contrastPercent}% (click to open/close panel)`
+                    : 'Contrast: 100% (click to open/close panel)'
                 }
               >
                 <ContrastIcon className="w-4 h-4" />
