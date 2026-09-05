@@ -74,6 +74,8 @@ export interface ViewerSettings {
   showGrid: boolean;
   gridSquareSizeInches: number;
   gridMajorEveryInches: number;
+  gridMinorColorHex: string;
+  gridMajorColorHex: string;
 
   // Shadows (self-shadowing only, no ground plane)
   castShadows: boolean;
