@@ -5,7 +5,9 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
-    base: process.env.GITHUB_PAGES === 'true' ? '/3dviewmaker2/' : '/',
+    // Relative base so assets resolve correctly regardless of the exact
+    // casing/subpath GitHub Pages serves the repo under.
+    base: process.env.GITHUB_PAGES === 'true' ? './' : '/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
