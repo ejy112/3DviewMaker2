@@ -198,8 +198,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // Environments (procedural PMREM presets — no external HDR files needed)
     const envTexturesRef = useRef<Partial<Record<string, THREE.Texture>>>({});
 
-    // Batch-loaded parts (for exploded view)
-    const batchPartsRef = useRef<{ object: THREE.Object3D; localCenter: THREE.Vector3 }[]>([]);
+    // Batch-loaded parts (for exploded view). basePosition is each part's resting local
+    // position — (0,0,0) for batch-loaded files (each keeps its own baked-in origin and is
+    // simply added to the group), but often non-zero for a single GLB's own child nodes (e.g. a
+    // figure's Head/Arm/Base nodes are already offset from the model's local origin). Explode
+    // must displace FROM that resting position, not overwrite it — see applyExplode.
+    const batchPartsRef = useRef<
+      { object: THREE.Object3D; localCenter: THREE.Vector3; basePosition: THREE.Vector3 }[]
+    >([]);
     const batchGroupCenterRef = useRef<THREE.Vector3>(new THREE.Vector3());
 
     // Clipping plane objects (reused, mutated in place)
@@ -1636,7 +1642,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           const obj = await parseBufferToObject(file.name, buffer);
           if (obj) {
             group.add(obj);
-            batchPartsRef.current.push({ object: obj, localCenter: new THREE.Vector3() });
+            batchPartsRef.current.push({
+              object: obj,
+              localCenter: new THREE.Vector3(),
+              basePosition: obj.position.clone(),
+            });
           }
         } catch (err) {
           console.error('Failed to load batch part', file.name, err);
@@ -1662,7 +1672,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       onModelLoadedHandler(`Batch (${files.length} parts): ${cleanNames}`);
     };
 
-    // Push each batch part away from the group's shared center, scaled by explodeAmount (0-1)
+    // Push each part away from the group's shared center, scaled by explodeAmount (0-1), offset
+    // from its own resting basePosition — not from world origin, which snapped GLB child nodes
+    // (whose authored local position is already non-zero) to the wrong place once explode came
+    // back down to 0 instead of restoring their real layout.
     const applyExplode = () => {
       if (batchPartsRef.current.length === 0) return;
       const amount = Math.max(0, Math.min(1, settingsRef.current.explodeAmount || 0));
@@ -1670,9 +1683,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const center = batchGroupCenterRef.current;
       batchPartsRef.current.forEach((part) => {
         const dir = part.localCenter.clone().sub(center);
-        if (dir.lengthSq() < 1e-8) return;
-        dir.normalize();
-        part.object.position.copy(dir.multiplyScalar(amount * magnitude));
+        if (dir.lengthSq() < 1e-8) {
+          part.object.position.copy(part.basePosition);
+          return;
+        }
+        dir.normalize().multiplyScalar(amount * magnitude);
+        part.object.position.copy(part.basePosition).add(dir);
       });
     };
 
@@ -1697,7 +1713,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
 
       root.updateMatrixWorld(true);
-      batchPartsRef.current = candidates.map((object) => ({ object, localCenter: new THREE.Vector3() }));
+      batchPartsRef.current = candidates.map((object) => ({
+        object,
+        localCenter: new THREE.Vector3(),
+        basePosition: object.position.clone(),
+      }));
       const groupBox = new THREE.Box3().setFromObject(root);
       groupBox.getCenter(batchGroupCenterRef.current);
       batchPartsRef.current.forEach((part) => {
@@ -3181,25 +3201,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
               )}
             </div>
 
-            {/* Exploded View — only relevant once the model actually has separable parts */}
+            {/* Exploded View — only relevant once the model actually has separable parts.
+                Unlike the other toggles, the panel's open/closed state is independent of the
+                slider value: clicking the icon just opens/closes the panel, so scrubbing the
+                slider down to 0% (or up to 100%) never closes it out from under you. Only the
+                panel's own X, or clicking the icon again, closes it. */}
             {partCount > 1 && (
               <div className="flex flex-col items-end gap-2">
                 <button
-                  onClick={() => {
-                    if (settings.explodeAmount > 0) {
-                      onUpdateSettings({ explodeAmount: 0 });
-                      setOpenRailPanel(null);
-                    } else {
-                      onUpdateSettings({ explodeAmount: 0.3 });
-                      setOpenRailPanel('explode');
-                    }
-                  }}
-                  className={railBtnClass(settings.explodeAmount > 0)}
-                  title={settings.explodeAmount > 0 ? 'Exploded View: On (click to reset)' : 'Exploded View: Off (click to explode)'}
+                  onClick={() => setOpenRailPanel(openRailPanel === 'explode' ? null : 'explode')}
+                  className={railBtnClass(settings.explodeAmount > 0 || openRailPanel === 'explode')}
+                  title={settings.explodeAmount > 0 ? 'Exploded View: On (click to open/close panel)' : 'Exploded View: Off (click to open/close panel)'}
                 >
                   <Boxes className="w-4 h-4" />
                 </button>
-                {openRailPanel === 'explode' && settings.explodeAmount > 0 && (
+                {openRailPanel === 'explode' && (
                   <div className={railPanelClass}>
                     {railPanelHeader('Exploded View')}
                     <div className="flex items-center justify-between">
