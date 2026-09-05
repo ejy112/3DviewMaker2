@@ -160,6 +160,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const clipPlaneXRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0));
     const clipPlaneYRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
     const clipPlaneZRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0));
+    // Which of the three planes are currently active, and the array handed to materials.
+    // The active *count* is baked into each material's compiled shader (NUM_CLIPPING_PLANES),
+    // so we only need to force a recompile when a plane is added/removed, not when an
+    // already-enabled plane's offset/flip is dragged (that's a plain uniform update).
+    const activeClipPlanesRef = useRef<THREE.Plane[]>([]);
+    const clipSignatureRef = useRef<string>('');
 
     // Matcap texture (procedurally generated zebra-stripe matcap)
     const matcapZebraTextureRef = useRef<THREE.Texture | null>(null);
@@ -716,33 +722,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       requestRender();
     };
 
-    const applyMaterialAndShadows = () => {
-      if (!currentModelRef.current) return;
-      const {
-        material: matKey,
-        castShadows,
-        minThicknessInches,
-        opacityPercent,
-        wireframeColorHex,
-        sketchColorHex,
-      } = settingsRef.current;
-
-      if (thicknessMaterialRef.current) {
-        thicknessMaterialRef.current.uniforms.uMinThickness.value = minThicknessInches;
-        thicknessMaterialRef.current.uniforms.uScaleFactor.value = dimensionsRef.current.scaleFactor;
-      }
-
-      // Keep lookdev preset styling in sync with their controls
-      materialsMap.current.wireframe.color.set(wireframeColorHex);
-      materialsMap.current.sketch.color.set(sketchColorHex);
-      if (!matcapZebraTextureRef.current) {
-        matcapZebraTextureRef.current = generateZebraMatcap();
-        materialsMap.current.matcapZebra.matcap = matcapZebraTextureRef.current;
-      }
-
-      const activeClipPlanes: THREE.Plane[] = [];
+    // Cheap, high-frequency-safe: mutates the three clip planes in place from current settings
+    // and only reassigns materials (+ forces a shader recompile) when a plane is actually
+    // added or removed, never when an already-enabled plane's offset/flip is being dragged.
+    const updateClippingPlanes = () => {
       const { clipping } = settingsRef.current;
       const inchesToUnits = 1 / getConversionToInches();
+      const activeClipPlanes: THREE.Plane[] = [];
       if (clipping.x.enabled) {
         clipPlaneXRef.current.normal.set(clipping.x.flip ? -1 : 1, 0, 0);
         clipPlaneXRef.current.constant = -clipping.x.offsetInches * inchesToUnits * (clipping.x.flip ? -1 : 1);
@@ -758,6 +744,57 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         clipPlaneZRef.current.constant = -clipping.z.offsetInches * inchesToUnits * (clipping.z.flip ? -1 : 1);
         activeClipPlanes.push(clipPlaneZRef.current);
       }
+
+      activeClipPlanesRef.current = activeClipPlanes;
+      const signature = `${clipping.x.enabled ? 1 : 0}${clipping.y.enabled ? 1 : 0}${clipping.z.enabled ? 1 : 0}`;
+      const countChanged = signature !== clipSignatureRef.current;
+      clipSignatureRef.current = signature;
+
+      if (countChanged && currentModelRef.current) {
+        currentModelRef.current.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const mesh = child as THREE.Mesh;
+            const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+            mats.forEach((m) => {
+              m.clippingPlanes = activeClipPlanes.length > 0 ? activeClipPlanes : null;
+              m.needsUpdate = true;
+            });
+          }
+        });
+      }
+      requestRender();
+    };
+
+    const applyMaterialAndShadows = () => {
+      if (!currentModelRef.current) return;
+      const {
+        material: matKey,
+        castShadows,
+        minThicknessInches,
+        opacityPercent,
+        wireframeColorHex,
+        sketchColorHex,
+      } = settingsRef.current;
+
+      if (dirLight1Ref.current) dirLight1Ref.current.castShadow = castShadows;
+
+      if (thicknessMaterialRef.current) {
+        thicknessMaterialRef.current.uniforms.uMinThickness.value = minThicknessInches;
+        thicknessMaterialRef.current.uniforms.uScaleFactor.value = dimensionsRef.current.scaleFactor;
+      }
+
+      // Keep lookdev preset styling in sync with their controls
+      materialsMap.current.wireframe.color.set(wireframeColorHex);
+      materialsMap.current.sketch.color.set(sketchColorHex);
+      if (!matcapZebraTextureRef.current) {
+        matcapZebraTextureRef.current = generateZebraMatcap();
+        materialsMap.current.matcapZebra.matcap = matcapZebraTextureRef.current;
+      }
+
+      // Make sure clip plane values/array are current before reading activeClipPlanesRef below
+      // (cheap — no-op traversal unless the enabled-plane count actually changed).
+      updateClippingPlanes();
+      const activeClipPlanes = activeClipPlanesRef.current;
 
       const opacity = Math.max(0, Math.min(1, opacityPercent / 100));
       const isGhost = opacity < 0.999;
@@ -781,24 +818,35 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           if (mesh.material) {
             const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
             mats.forEach((m) => {
-              m.clippingPlanes = activeClipPlanes.length > 0 ? activeClipPlanes : null;
-              m.clipShadows = true;
+              const mat = m as THREE.Material;
+              const nextClippingPlanes = activeClipPlanes.length > 0 ? activeClipPlanes : null;
+              const clipPlanesChanged = mat.clippingPlanes !== nextClippingPlanes;
+              mat.clippingPlanes = nextClippingPlanes;
+              mat.clipShadows = true;
+
+              const wasTransparent = mat.transparent;
               if (isGhost) {
-                if (m.userData.__preGhostOpacity === undefined) {
-                  m.userData.__preGhostOpacity = (m as THREE.Material).opacity;
-                  m.userData.__preGhostTransparent = (m as THREE.Material).transparent;
+                if (mat.userData.__preGhostOpacity === undefined) {
+                  mat.userData.__preGhostOpacity = mat.opacity;
+                  mat.userData.__preGhostTransparent = mat.transparent;
                 }
-                (m as THREE.Material).transparent = true;
-                (m as THREE.Material).opacity = opacity;
-                (m as THREE.Material).depthWrite = false;
-              } else if (m.userData.__preGhostOpacity !== undefined) {
-                (m as THREE.Material).opacity = m.userData.__preGhostOpacity;
-                (m as THREE.Material).transparent = m.userData.__preGhostTransparent;
-                (m as THREE.Material).depthWrite = true;
-                delete m.userData.__preGhostOpacity;
-                delete m.userData.__preGhostTransparent;
+                mat.transparent = true;
+                mat.opacity = opacity;
+                mat.depthWrite = false;
+              } else if (mat.userData.__preGhostOpacity !== undefined) {
+                mat.opacity = mat.userData.__preGhostOpacity;
+                mat.transparent = mat.userData.__preGhostTransparent;
+                mat.depthWrite = true;
+                delete mat.userData.__preGhostOpacity;
+                delete mat.userData.__preGhostTransparent;
               }
-              m.needsUpdate = true;
+
+              // needsUpdate triggers a full shader recompile — only do it when something baked
+              // into the compiled program actually changed. Plain opacity drags (already in
+              // ghost mode) must never hit this, or every slider tick stalls on a GPU recompile.
+              if (mat.transparent !== wasTransparent || clipPlanesChanged) {
+                mat.needsUpdate = true;
+              }
             });
           }
         }
@@ -2022,7 +2070,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const canvas = canvasRef.current;
 
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(settings.backgroundColorHex);
+      // Background is always painted by the background/vignette backdrop pass (drawn first,
+      // behind the model — see VignetteBackgroundPass / render loop), never by scene.background
+      // directly, so the model render can never accidentally cover or be covered incorrectly.
+      scene.background = null;
       sceneRef.current = scene;
 
       const renderer = new THREE.WebGLRenderer({
@@ -2245,75 +2296,135 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       };
     }, []);
 
-    // Sync settings changes
+    // Each settings effect below has a narrow, primitive dependency list instead of depending
+    // on the whole `settings` object. That matters because every slider in the sidebar fires
+    // onChange continuously while dragging — with one dependency list on all of `settings`,
+    // dragging ANY slider (even one unrelated to materials, like shadow softness) re-ran a full
+    // model traversal and forced a shader recompile on every mesh every tick, which is what
+    // made the UI feel laggy. Splitting these up means a given slider only ever triggers the
+    // handful of cheap operations it actually needs.
+
+    // Background / vignette backdrop
     useEffect(() => {
-      if (!sceneRef.current || !rendererRef.current) return;
+      if (!vignetteMaterialRef.current) return;
+      vignetteMaterialRef.current.uniforms.bgColor.value.set(settings.backgroundColorHex);
+      vignetteMaterialRef.current.uniforms.vigColor.value.set(settings.vignetteColorHex);
+      vignetteMaterialRef.current.uniforms.intensity.value = settings.vignetteEnabled
+        ? settings.vignetteIntensityPercent / 100
+        : 0;
+      requestRender();
+    }, [settings.backgroundColorHex, settings.vignetteColorHex, settings.vignetteEnabled, settings.vignetteIntensityPercent]);
 
-      // Background is always painted by the background/vignette backdrop pass (drawn first,
-      // behind the model — see VignetteBackgroundPass / render loop), never by scene.background
-      // directly, so the model render can never accidentally cover or be covered incorrectly.
-      sceneRef.current.background = null;
+    // Contrast (light intensities only — no mesh/material work)
+    useEffect(() => {
+      if (!ambientLightRef.current || !dirLight1Ref.current || !dirLight2Ref.current) return;
+      const factor = settings.contrastPercent / 100;
+      ambientLightRef.current.intensity = 1.2 / (factor * factor);
+      dirLight1Ref.current.intensity = 2.5 * factor;
+      dirLight2Ref.current.intensity = 1.0 * factor;
+      requestRender();
+    }, [settings.contrastPercent]);
 
-      // Vignette (background-only backdrop). Intensity is forced to 0 when the effect is
-      // toggled off, so the backdrop pass still just does a flat background-color fill.
-      if (vignetteMaterialRef.current) {
-        vignetteMaterialRef.current.uniforms.bgColor.value.set(settings.backgroundColorHex);
-        vignetteMaterialRef.current.uniforms.vigColor.value.set(settings.vignetteColorHex);
-        vignetteMaterialRef.current.uniforms.intensity.value = settings.vignetteEnabled
-          ? settings.vignetteIntensityPercent / 100
-          : 0;
-      }
+    // Camera mode (ortho/perspective) & focal length
+    useEffect(() => {
+      if (!cameraOrthoRef.current || !cameraPerspRef.current || !controlsRef.current || !viewHelperRef.current) return;
+      const targetCam = settings.isOrtho ? cameraOrthoRef.current : cameraPerspRef.current;
+      const currentCam = activeCameraRef.current;
 
-      // Contrast
-      if (ambientLightRef.current && dirLight1Ref.current && dirLight2Ref.current) {
-        const factor = settings.contrastPercent / 100;
-        ambientLightRef.current.intensity = 1.2 / (factor * factor);
-        dirLight1Ref.current.intensity = 2.5 * factor;
-        dirLight2Ref.current.intensity = 1.0 * factor;
-      }
+      if (targetCam !== currentCam && currentCam) {
+        targetCam.position.copy(currentCam.position);
+        targetCam.quaternion.copy(currentCam.quaternion);
 
-      // Camera Switch (Ortho vs Perspective)
-      if (cameraOrthoRef.current && cameraPerspRef.current && controlsRef.current && viewHelperRef.current) {
-        const targetCam = settings.isOrtho ? cameraOrthoRef.current : cameraPerspRef.current;
-        const currentCam = activeCameraRef.current;
-
-        if (targetCam !== currentCam && currentCam) {
-          targetCam.position.copy(currentCam.position);
-          targetCam.quaternion.copy(currentCam.quaternion);
-
-          if (settings.isOrtho) {
-            cameraOrthoRef.current.zoom = 1;
-            updateOrthoFrustum();
-          } else {
-            cameraPerspRef.current.setFocalLength(settings.focalLength);
-            cameraPerspRef.current.updateProjectionMatrix();
-          }
-
-          activeCameraRef.current = targetCam;
-          controlsRef.current.object = targetCam;
-          viewHelperRef.current.camera = targetCam;
-          controlsRef.current.update();
-        } else if (!settings.isOrtho) {
+        if (settings.isOrtho) {
+          cameraOrthoRef.current.zoom = 1;
+          updateOrthoFrustum();
+        } else {
           cameraPerspRef.current.setFocalLength(settings.focalLength);
           cameraPerspRef.current.updateProjectionMatrix();
         }
-      }
 
-      // Shadows & Materials
-      if (dirLight1Ref.current) dirLight1Ref.current.castShadow = settings.castShadows;
-      applyShadowSettings();
-      applyMaterialAndShadows();
-      updateGrid();
-      applyEnvironment();
-      syncPostProcessing();
-      applyExplode();
-      if (currentModelRef.current) {
-        const partCount = batchPartsRef.current.length > 0 ? batchPartsRef.current.length : 1;
-        refreshVolumeStats(partCount);
+        activeCameraRef.current = targetCam;
+        controlsRef.current.object = targetCam;
+        viewHelperRef.current.camera = targetCam;
+        controlsRef.current.update();
+      } else if (!settings.isOrtho) {
+        cameraPerspRef.current.setFocalLength(settings.focalLength);
+        cameraPerspRef.current.updateProjectionMatrix();
       }
+      requestRender();
+    }, [settings.isOrtho, settings.focalLength]);
+
+    // Shadow quality (light/shadow-camera settings only — no mesh traversal)
+    useEffect(() => {
+      if (!dirLight1Ref.current) return;
+      applyShadowSettings();
+      requestRender();
+    }, [settings.castShadows, settings.shadowSoftness, settings.shadowDarkness, settings.shadowMapResolution]);
+
+    // Material, shadow-casting, opacity/ghost, and lookdev-color changes (the heavier,
+    // full-model-traversal path — but now only runs for the settings that actually need it)
+    useEffect(() => {
+      applyMaterialAndShadows();
+    }, [
+      settings.material,
+      settings.castShadows,
+      settings.opacityPercent,
+      settings.wireframeColorHex,
+      settings.sketchColorHex,
+      settings.minThicknessInches,
+    ]);
+
+    // Clipping planes — offset/flip drags just mutate plane values (cheap); only an
+    // enabled-plane count change forces a material recompile (see updateClippingPlanes).
+    useEffect(() => {
+      updateClippingPlanes();
+    }, [
+      settings.clipping.x.enabled,
+      settings.clipping.x.offsetInches,
+      settings.clipping.x.flip,
+      settings.clipping.y.enabled,
+      settings.clipping.y.offsetInches,
+      settings.clipping.y.flip,
+      settings.clipping.z.enabled,
+      settings.clipping.z.offsetInches,
+      settings.clipping.z.flip,
+    ]);
+
+    // Grid
+    useEffect(() => {
+      updateGrid();
+    }, [settings.showGrid, settings.gridSquareSizeInches, settings.gridMajorEveryInches]);
+
+    // Environment preset (PMREM lookups are cached per-preset, so this is cheap after first use)
+    useEffect(() => {
+      applyEnvironment();
+      requestRender();
+    }, [settings.environmentPreset]);
+
+    // Post-processing (SSAO / antialiasing)
+    useEffect(() => {
+      syncPostProcessing();
+      requestRender();
+    }, [settings.ssaoEnabled, settings.ssaoRadius, settings.antialiasMode]);
+
+    // Exploded view
+    useEffect(() => {
+      applyExplode();
+      requestRender();
+    }, [settings.explodeAmount]);
+
+    // Lock-lights-to-camera toggle
+    useEffect(() => {
       if (activeCameraRef.current) updateLights(activeCameraRef.current);
       requestRender();
-    }, [settings]);
+    }, [settings.lockLightsToCamera]);
+
+    // Volume/weight/cost recompute (cheap — reuses cached unscaled volume)
+    useEffect(() => {
+      if (!currentModelRef.current) return;
+      const partCount = batchPartsRef.current.length > 0 ? batchPartsRef.current.length : 1;
+      refreshVolumeStats(partCount);
+    }, [settings.materialDensityGCm3, settings.costPerKgUSD]);
 
     // Sync dimensions changes
     useEffect(() => {
