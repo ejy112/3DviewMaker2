@@ -180,24 +180,34 @@ interface AccordionSectionProps {
   children: React.ReactNode;
   bordered?: boolean;
   isLight?: boolean;
+  // Optional extra control (e.g. "Hide All") rendered between the title and the chevron —
+  // a sibling of both toggle buttons, not nested inside either, so it never fights their clicks.
+  headerExtra?: React.ReactNode;
 }
 
 // Shared collapsible section used for Clipping Planes, Post-Processing, and Volume & Cost —
 // keeps their header style, spacing, and toggle behavior identical everywhere they appear.
-function AccordionSection({ title, isOpen, onToggle, children, bordered, isLight }: AccordionSectionProps) {
+function AccordionSection({ title, isOpen, onToggle, children, bordered, isLight, headerExtra }: AccordionSectionProps) {
   return (
     <div
       className={`flex flex-col gap-2 ${
         bordered ? `pt-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-700'}` : ''
       }`}
     >
-      <button
-        onClick={onToggle}
-        className="w-full flex items-center justify-between text-[11px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer"
-      >
-        <span>{title}</span>
-        {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-      </button>
+      <div className="w-full flex items-center justify-between gap-2">
+        <button
+          onClick={onToggle}
+          className="flex-1 text-left text-[11px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer"
+        >
+          {title}
+        </button>
+        <div className="flex items-center gap-2">
+          {headerExtra}
+          <button onClick={onToggle} className="text-slate-400 cursor-pointer flex items-center">
+            {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+      </div>
       {isOpen && <div className="flex flex-col gap-2.5 text-xs">{children}</div>}
     </div>
   );
@@ -341,6 +351,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
+  const handleHideAllParts = () => {
+    parts.forEach((part, i) => {
+      if (part.visible) onTogglePartVisibility(i);
+    });
+  };
+
   const hasRotations = dimensions.rotX !== 0 || dimensions.rotY !== 0 || dimensions.rotZ !== 0;
 
   return (
@@ -375,7 +391,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v0.93
+                  v0.94
                 </span>
               </span>
             </div>
@@ -457,6 +473,56 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             </div>
           </div>
+
+          {/* LOADED MESHES — only relevant once a model actually has multiple separable parts
+              (a batch-loaded assembly, or a GLB whose top-level nodes are separable meshes).
+              Sits right above the Viewer panel so it's visible as soon as an assembly loads. */}
+          {parts.length > 1 && (
+            <div
+              className={`p-3 rounded-lg border flex flex-col gap-2 ${
+                isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
+              }`}
+            >
+              <AccordionSection
+                title="Loaded Meshes"
+                isOpen={isLoadedMeshesOpen}
+                onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
+                isLight={isLight}
+                headerExtra={
+                  <button
+                    onClick={handleHideAllParts}
+                    title="Hide every loaded part"
+                    className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap"
+                  >
+                    Hide All
+                  </button>
+                }
+              >
+                {parts.map((part, i) => (
+                  <div key={`${part.name}-${i}`} className="flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 min-w-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={part.visible}
+                        onChange={() => onTogglePartVisibility(i)}
+                        className="accent-sky-500 w-4 h-4 cursor-pointer shrink-0"
+                      />
+                      <span className="truncate" title={part.name}>
+                        {part.name}
+                      </span>
+                    </label>
+                    <button
+                      onClick={() => onDeletePart(i)}
+                      title="Remove this part from the scene and free its memory"
+                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </AccordionSection>
+            </div>
+          )}
 
           {/* VIEWER PANEL */}
           <div
@@ -566,47 +632,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             </div>
           </div>
-
-          {/* LOADED MESHES — only relevant once a model actually has multiple separable parts
-              (a batch-loaded assembly, or a GLB whose top-level nodes are separable meshes).
-              Clipping Planes and Exploded View moved to floating icons over the viewport. */}
-          {parts.length > 1 && (
-            <div
-              className={`p-3 rounded-lg border flex flex-col gap-2 ${
-                isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
-              }`}
-            >
-              <AccordionSection
-                title="Loaded Meshes"
-                isOpen={isLoadedMeshesOpen}
-                onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
-                isLight={isLight}
-              >
-                {parts.map((part, i) => (
-                  <div key={`${part.name}-${i}`} className="flex items-center justify-between gap-2">
-                    <label className="flex items-center gap-2 min-w-0 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={part.visible}
-                        onChange={() => onTogglePartVisibility(i)}
-                        className="accent-sky-500 w-4 h-4 cursor-pointer shrink-0"
-                      />
-                      <span className="truncate" title={part.name}>
-                        {part.name}
-                      </span>
-                    </label>
-                    <button
-                      onClick={() => onDeletePart(i)}
-                      title="Remove this part from the scene and free its memory"
-                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </AccordionSection>
-            </div>
-          )}
 
           {/* EXPORT PANEL */}
           <div
