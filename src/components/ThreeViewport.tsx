@@ -2712,22 +2712,28 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       >
         <canvas ref={canvasRef} id="canvas3d" className="absolute inset-0 w-full h-full block" />
 
-        {/* Grid Controls — relocated here from Settings so they're right next to what they affect */}
+        {/* Grid Controls — relocated here from Settings so they're right next to what they affect.
+            One click does both: toggles the grid itself AND reveals its settings, instead of
+            opening a panel that still needed a separate checkbox to actually turn anything on. */}
         {loadedFileName && (
           <div className="absolute top-4 right-4 z-10 flex flex-col items-end gap-2">
             <button
-              onClick={() => setIsGridPanelOpen((prev) => !prev)}
+              onClick={() => {
+                const next = !settings.showGrid;
+                onUpdateSettings({ showGrid: next });
+                setIsGridPanelOpen(next);
+              }}
               className={`p-2 rounded-lg border shadow-lg backdrop-blur-md cursor-pointer transition-colors ${
                 settings.showGrid
                   ? 'bg-sky-600 border-sky-400 text-white'
                   : 'bg-slate-900/90 border-slate-700/80 text-slate-300 hover:bg-slate-800'
               }`}
-              title="Grid Options"
+              title={settings.showGrid ? 'Grid: On (click to turn off) — G' : 'Grid: Off (click to turn on) — G'}
             >
               <LayoutGrid className="w-4 h-4" />
             </button>
 
-            {isGridPanelOpen && (
+            {isGridPanelOpen && settings.showGrid && (
               <div className="w-56 p-3 rounded-xl bg-slate-900/95 border border-slate-700/80 shadow-2xl backdrop-blur-md text-xs text-slate-200 flex flex-col gap-2.5">
                 <div className="flex items-center justify-between">
                   <span className="font-bold uppercase tracking-wider text-slate-400 text-[10px]">
@@ -2738,50 +2744,36 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                   </button>
                 </div>
 
-                <label className="flex items-center justify-between cursor-pointer">
-                  <span>Show Grid (G)</span>
+                <div className="flex items-center justify-between">
+                  <span>Minor Size (in):</span>
                   <input
-                    type="checkbox"
-                    checked={settings.showGrid}
-                    onChange={(e) => onUpdateSettings({ showGrid: e.target.checked })}
-                    className="accent-sky-500 w-4 h-4 cursor-pointer"
+                    type="number"
+                    value={settings.gridSquareSizeInches}
+                    step="0.0625"
+                    min="0.001"
+                    onChange={(e) =>
+                      onUpdateSettings({ gridSquareSizeInches: parseFloat(e.target.value) || 0.125 })
+                    }
+                    className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
                   />
-                </label>
-
-                {settings.showGrid && (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <span>Minor Size (in):</span>
-                      <input
-                        type="number"
-                        value={settings.gridSquareSizeInches}
-                        step="0.0625"
-                        min="0.001"
-                        onChange={(e) =>
-                          onUpdateSettings({ gridSquareSizeInches: parseFloat(e.target.value) || 0.125 })
-                        }
-                        className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span>Major (blue) Every (in):</span>
-                      <input
-                        type="number"
-                        value={settings.gridMajorEveryInches}
-                        step="0.25"
-                        min="0.001"
-                        onChange={(e) =>
-                          onUpdateSettings({ gridMajorEveryInches: parseFloat(e.target.value) || 1 })
-                        }
-                        className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
-                      />
-                    </div>
-                    <div className="text-[10px] text-sky-400 leading-tight pt-1 border-t border-slate-700/60">
-                      Grid is a backdrop behind the model that always faces the camera, so it's
-                      visible from every view — true to scale in <b>Orthographic View</b>.
-                    </div>
-                  </>
-                )}
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Major (blue) Every (in):</span>
+                  <input
+                    type="number"
+                    value={settings.gridMajorEveryInches}
+                    step="0.25"
+                    min="0.001"
+                    onChange={(e) =>
+                      onUpdateSettings({ gridMajorEveryInches: parseFloat(e.target.value) || 1 })
+                    }
+                    className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
+                  />
+                </div>
+                <div className="text-[10px] text-sky-400 leading-tight pt-1 border-t border-slate-700/60">
+                  Grid is a backdrop behind the model that always faces the camera, so it's
+                  visible from every view — true to scale in <b>Orthographic View</b>.
+                </div>
               </div>
             )}
           </div>
