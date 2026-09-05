@@ -1,0 +1,74 @@
+Feature List:
+
+PhotoOutput:
+Jazwares logo. Remove the scale value.
+scaled to 300 DPI so they load into PS or Illustrator easily to scale.
+
+
+
+
+Fix MP4 Output (It's only doing webm)
+
+Move Grid Options to View Area
+
+Perspective, go down to 12mm.
+
+Fix Shadows, Add contrast boost
+
+Fix grid on turntable rotation
+
+Total Volume, Cost per kg est.
+
+add more grid options (1" marks in blue, primar axis in blue) align grid to bottom  most  part of mesh, center L/R.
+
+Clean grouping of rotation controls.
+
+Lookdev
+Wireframe (wireframe color)
+Sketch/CellShaded (color options)
+Matcap Zebra
+Normal Mapped High color (Blender pink/green)
+Lighting Options (environments) Actually good AO
+ghost/transparent (Slider on any of these)
+Clipping Plane TOP/BOT, LR, FB. Location from origin and flip
+red clay, glossy chrome, matte grey, pearl zbrush
+HDRI IBL (Image-Based Lighting) Selector: A drop-down menu switching between distinct .hdr or .exr environment maps (e.g., Studio, Outdoor, Interior, Sunset).
+This relies on RGBELoader and pmremGenerator to provide realistic, mathematically accurate reflections and ambient lighting across the mesh surface.
+Studio Light Rig Controller: Quick toggles for classic lighting setups, such as a 3-point light rig (Key, Fill, and Rim).
+Sliders should control light intensity, color temperature, and the position/rotation of the rig relative to the camera.
+Cavity Options
+SSAO Radis Intensity Bias
+Screen Space Rflections
+
+
+5k output option
+
+can you put an image tracker in the bottom left corner of the left column, one that hides away by default and just reads "FEEDBACK" when it opens have it toggle between "Bug () Feature Request".
+And keep a running log that only I can mark as complete. when you hover out of the area it minimizes.
+ have it send eyanovich@jazware.com a chat message when any users places a note, and record the user name of the person who add it.
+
+ok, revise the name of "original material" to "Mapped/Vertex Color". and remove the horizontal rule under background color (keep after vignette effect). 
+Make sure the vignette effect doesn't affect the mesh/model and i only a background effect. Again, make sure it works in the video output but that it is NOT present in the image output mode
+Renamed Material Mode:
+Updated the material selection dropdown option from "Original Material" to "Mapped/Vertex Color".
+Refined Sidebar Divider Layout:
+Removed the horizontal rule between the Background Color picker and the Vignette Effect controls so they sit together cleanly as a single background styling section.
+Kept the horizontal rule directly after the Vignette Effect section.
+Background-Only Vignette Effect:
+Re-architected the vignette effect as a background backdrop pass rendered behind the 3D scene.
+The vignette smooth-steps from your selected background color to the vignette tint and intensity without overlaying, darkening, or altering the model's mesh, vertex colors, or textures.
+Turntable Video Export: The background vignette is rendered behind the model during video capture.
+Turnaround Image Output: The vignette effect is omitted during turnaround contact sheet generation for clean panels.
+
+
+Batch load, and exploded views.
+
+Screen-Space Dimension Labels: Projecting 3D vector coordinates onto 2D screen space using .project(camera) to position clean, HTML/CSS text labels showing dimensions that float dynamically alongside the 3D model.
+Click and drag dims (snap to vertex, drag to pick and modify, length, and project lock to World XYZ option)
+
+
+Review tools, screenshots with notes, approvals. comments snaped to vertex.
+
+SSAO (Screen Space Ambient Occlusion): Integration of EffectComposer with an SAOPass or SSAOPass. This adds realistic shadows in deep crevices, joints,
+and holes, providing massive depth perception boosts to untextured 3D models.SMAA / FXAA Anti-Aliasing: High-performance anti-aliasing passes to
+clean up jagged edges along the high-poly STL triangles, keeping the LookDev view crisp.
