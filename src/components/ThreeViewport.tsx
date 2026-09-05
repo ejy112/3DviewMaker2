@@ -8,7 +8,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
+import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
@@ -46,6 +46,7 @@ class VignetteBackgroundPass extends Pass {
 }
 import { MeshBVH } from 'three-mesh-bvh';
 import {
+  LoadedPart,
   MaterialKey,
   ModelDimensions,
   ResolutionOption,
@@ -75,6 +76,8 @@ export interface ThreeViewportHandle {
     field: 'scale' | 'x' | 'y' | 'z' | 'rotX' | 'rotY' | 'rotZ',
     value: number
   ) => void;
+  togglePartVisibility: (index: number) => void;
+  deletePart: (index: number) => void;
 }
 
 export interface VolumeStats {
@@ -96,7 +99,7 @@ interface ThreeViewportProps {
   onOpenLocalUpload: () => void;
   onOpenDriveModal?: () => void;
   onVolumeComputed?: (stats: VolumeStats | null) => void;
-  onBatchInfoChanged?: (partCount: number) => void;
+  onPartsChanged?: (parts: LoadedPart[]) => void;
 }
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>(
@@ -112,7 +115,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       onOpenLocalUpload,
       onOpenDriveModal,
       onVolumeComputed,
-      onBatchInfoChanged,
+      onPartsChanged,
     },
     ref
   ) => {
@@ -151,7 +154,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // Post-processing
     const composerRef = useRef<EffectComposer | null>(null);
     const renderPassRef = useRef<RenderPass | null>(null);
-    const ssaoPassRef = useRef<SSAOPass | null>(null);
+    const aoPassRef = useRef<GTAOPass | null>(null);
     const fxaaPassRef = useRef<ShaderPass | null>(null);
     const smaaPassRef = useRef<SMAAPass | null>(null);
 
@@ -363,38 +366,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       return tex;
     };
 
-    // Materials map — LookDev presets
+    // Materials map — LookDev presets. Gold/Chrome/Red Clay/Pearl used to each be their own
+    // fixed MeshStandardMaterial/MeshPhysicalMaterial preset; they're all just points on the
+    // same color/roughness/metalness space, so they've been consolidated into one "Custom"
+    // material the user dials in themselves instead.
     const materialsMap = useRef<{
       grey: THREE.MeshStandardMaterial;
-      gold: THREE.MeshStandardMaterial;
-      redClay: THREE.MeshStandardMaterial;
-      chrome: THREE.MeshStandardMaterial;
-      matteGrey: THREE.MeshStandardMaterial;
-      pearl: THREE.MeshPhysicalMaterial;
+      custom: THREE.MeshStandardMaterial;
       normal: THREE.MeshNormalMaterial;
       wireframe: THREE.MeshBasicMaterial;
       sketch: THREE.ShaderMaterial;
       matcapZebra: THREE.MeshMatcapMaterial;
     }>({
       grey: new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.5, metalness: 0.1 }),
-      gold: new THREE.MeshStandardMaterial({ color: 0xffd700, roughness: 0.15, metalness: 1.0 }),
-      redClay: new THREE.MeshStandardMaterial({ color: 0xb33326, roughness: 0.75, metalness: 0.0 }),
-      chrome: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.02, metalness: 1.0 }),
-      matteGrey: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.95, metalness: 0.0 }),
-      pearl: new THREE.MeshPhysicalMaterial({
-        color: 0xf3eef2,
-        // Softer roughness + a milder clearcoat/iridescence than the original preset: at full
-        // strength this stacked three separate bright specular responses (base, clearcoat,
-        // iridescence) that clipped to a blown-out white blob before tone mapping was added,
-        // and still looked harsh once it was.
-        roughness: 0.4,
-        metalness: 0.05,
-        clearcoat: 0.6,
-        clearcoatRoughness: 0.35,
-        iridescence: 0.35,
-        iridescenceIOR: 1.3,
-        iridescenceThicknessRange: [100, 400],
-      }),
+      custom: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.95, metalness: 0.0 }),
       normal: new THREE.MeshNormalMaterial({ flatShading: false }),
       wireframe: new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true }),
       sketch: sketchMaterialRef.current,
@@ -594,31 +579,37 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const syncPostProcessing = () => {
       const { ssaoEnabled, ssaoRadius, ssaoIntensity, ssaoBias, antialiasMode } = settingsRef.current;
 
-      if (ssaoPassRef.current) {
-        ssaoPassRef.current.enabled = ssaoEnabled;
+      if (aoPassRef.current) {
+        aoPassRef.current.enabled = ssaoEnabled;
 
-        // kernelRadius is a raw scene-unit distance, not normalized to the model at all — a
+        // GTAO's radius is a raw scene-unit distance, not normalized to the model at all — a
         // fixed number here means the exact same setting looks like fine detail on a model
         // imported in millimeters and one big blurry blob on the same model imported in meters.
         // Scaling it to the model's own bounding radius keeps the slider meaning the same
         // ("% of the object") regardless of the file's native unit scale.
         const modelRadius = modelRadiusRef.current || 1;
         const radiusFrac = Math.max(1, ssaoRadius) / 100;
-        ssaoPassRef.current.kernelRadius = modelRadius * radiusFrac * 0.35;
 
-        // Bias controls minDistance (how far a neighboring sample must be before it's allowed
-        // to occlude) — too low and flat surfaces get noisy self-occlusion speckle, too high and
-        // fine crevices stop registering. maxDistance follows it so raising bias doesn't also
-        // cut off the far end of the occlusion range.
+        // thickness is how far behind a surface a sample can be and still count as an occluder —
+        // too thin and fine crevices stop registering, too thick and distant surfaces start
+        // occluding things they shouldn't.
         const biasFrac = Math.max(0, Math.min(100, ssaoBias)) / 100;
-        const minDistance = 0.0005 + biasFrac * 0.008;
-        ssaoPassRef.current.minDistance = minDistance;
-        ssaoPassRef.current.maxDistance = Math.max(minDistance * 6, 0.02 + biasFrac * 0.03);
+        const thickness = 0.15 + biasFrac * 1.5;
 
-        const ssaoUniforms = ssaoPassRef.current.ssaoMaterial.uniforms as Record<string, THREE.IUniform>;
-        if (ssaoUniforms.uIntensity) {
-          ssaoUniforms.uIntensity.value = Math.max(0, ssaoIntensity) / 100;
-        }
+        // GTAO's raw occlusion values sit close to white (1.0) everywhere except right at real
+        // creases — physically correct, but a plain linear blend barely darkens anything (0.7
+        // blended at intensity 1 is still a pale 0.7, easy to mistake for "no depth"). `scale`
+        // is a pow() contrast exponent applied to the raw value: pow(1.0, n) stays 1.0 no matter
+        // what, so flat/open surfaces are untouched, while already-occluded crease values (< 1)
+        // get pushed dramatically darker — deepening exactly the cracks, not painting a haze
+        // over the whole mesh. blendIntensity is left at 1 (apply the computed result as-is).
+        const scale = 0.5 + (Math.max(0, ssaoIntensity) / 100) * 3.5;
+        aoPassRef.current.updateGtaoMaterial({
+          radius: modelRadius * radiusFrac * 0.5,
+          thickness,
+          scale,
+        });
+        aoPassRef.current.blendIntensity = 1.0;
       }
 
       if (fxaaPassRef.current && containerRef.current && rendererRef.current) {
@@ -652,8 +643,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       if (!renderer || !composer || !renderPassRef.current) return;
 
       if (renderPassRef.current.camera !== cam) renderPassRef.current.camera = cam as any;
-      if (ssaoPassRef.current && (ssaoPassRef.current as any).camera !== cam) {
-        (ssaoPassRef.current as any).camera = cam;
+      if (aoPassRef.current && aoPassRef.current.camera !== cam) {
+        aoPassRef.current.camera = cam;
       }
       composer.render();
 
@@ -827,13 +818,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const countChanged = signature !== clipSignatureRef.current;
       clipSignatureRef.current = signature;
 
-      // SSAOPass computes ambient occlusion from its own override material (a plain
+      // GTAOPass computes ambient occlusion from its own override material (a plain
       // MeshNormalMaterial swapped in for every mesh via scene.overrideMaterial), which never
-      // saw our per-mesh clippingPlanes assignment below — so without this, SSAO "sees" and
+      // saw our per-mesh clippingPlanes assignment below — so without this, AO "sees" and
       // shades the geometry that clipping is supposed to have cut away, showing up as a ghosted
       // blob of occlusion/shadow hanging past the visible cut surface.
-      if (ssaoPassRef.current) {
-        ssaoPassRef.current.normalMaterial.clippingPlanes = nextClippingPlanes;
+      if (aoPassRef.current) {
+        aoPassRef.current.normalMaterial.clippingPlanes = nextClippingPlanes;
       }
 
       if (countChanged && currentModelRef.current) {
@@ -861,7 +852,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         minThicknessInches,
         opacityPercent,
         wireframeColorHex,
-        matteColorHex,
+        customColorHex,
+        customRoughnessPercent,
+        customMetalnessPercent,
         sketchColorHex,
         sketchHighlightColorHex,
         sketchShadowColorHex,
@@ -876,7 +869,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       // Keep lookdev preset styling in sync with their controls
       materialsMap.current.wireframe.color.set(wireframeColorHex);
-      materialsMap.current.matteGrey.color.set(matteColorHex);
+      materialsMap.current.custom.color.set(customColorHex);
+      materialsMap.current.custom.roughness = Math.max(0, Math.min(100, customRoughnessPercent)) / 100;
+      materialsMap.current.custom.metalness = Math.max(0, Math.min(100, customMetalnessPercent)) / 100;
       sketchMaterialRef.current.uniforms.uBaseColor.value.set(sketchColorHex);
       sketchMaterialRef.current.uniforms.uHighlightColor.value.set(sketchHighlightColorHex);
       sketchMaterialRef.current.uniforms.uShadowColor.value.set(sketchShadowColorHex);
@@ -1393,7 +1388,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
         const { meshCount } = computeVolumeAndWatertight(currentModelRef.current);
         const partCount = batchPartsRef.current.length > 0 ? batchPartsRef.current.length : 1;
-        onBatchInfoChanged?.(partCount);
+        notifyPartsChanged();
         refreshVolumeStats(Math.max(partCount, meshCount > 0 ? 1 : 0));
       }
 
@@ -1433,6 +1428,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                   mesh.userData.originalMaterial = mesh.material;
                 }
               });
+              detectExplodableParts(currentModelRef.current);
               applyMaterialAndShadows();
               if (sceneRef.current) sceneRef.current.add(currentModelRef.current);
               onModelLoadedHandler(name);
@@ -1622,6 +1618,104 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       });
     };
 
+    // Populates batchPartsRef from a freshly-loaded single GLB/glTF's own top-level nodes, so
+    // Explode/Loaded-Meshes work for any multi-part model, not only files brought in through the
+    // dedicated multi-file Batch Load flow. A part must have at least one mesh descendant to
+    // count (skips empty transform/helper nodes); fewer than 2 such nodes means there's nothing
+    // separable, so it's left as a single whole model.
+    const detectExplodableParts = (root: THREE.Object3D) => {
+      const hasMeshDescendant = (obj: THREE.Object3D) => {
+        let found = false;
+        obj.traverse((n) => {
+          if ((n as THREE.Mesh).isMesh) found = true;
+        });
+        return found;
+      };
+
+      const candidates = root.children.filter(hasMeshDescendant);
+      if (candidates.length < 2) {
+        batchPartsRef.current = [];
+        return;
+      }
+
+      root.updateMatrixWorld(true);
+      batchPartsRef.current = candidates.map((object) => ({ object, localCenter: new THREE.Vector3() }));
+      const groupBox = new THREE.Box3().setFromObject(root);
+      groupBox.getCenter(batchGroupCenterRef.current);
+      batchPartsRef.current.forEach((part) => {
+        const box = new THREE.Box3().setFromObject(part.object);
+        box.getCenter(part.localCenter);
+      });
+    };
+
+    const getPartName = (obj: THREE.Object3D, index: number): string =>
+      obj.userData.partName || obj.name || `Part ${index + 1}`;
+
+    const notifyPartsChanged = () => {
+      onPartsChanged?.(
+        batchPartsRef.current.map((part, i) => ({
+          name: getPartName(part.object, i),
+          visible: part.object.visible,
+        }))
+      );
+    };
+
+    const togglePartVisibility = (index: number) => {
+      const part = batchPartsRef.current[index];
+      if (!part) return;
+      part.object.visible = !part.object.visible;
+      notifyPartsChanged();
+      requestRender();
+    };
+
+    const collectMeshMaterials = (obj: THREE.Object3D, into: Set<THREE.Material>) => {
+      obj.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const original = mesh.userData.originalMaterial;
+        if (original) (Array.isArray(original) ? original : [original]).forEach((m) => into.add(m));
+        if (mesh.material) (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach((m) => into.add(m));
+      });
+    };
+
+    const deletePart = (index: number) => {
+      const part = batchPartsRef.current[index];
+      if (!part) return;
+
+      // Multiple meshes/parts commonly reference the exact same material (e.g. every part of
+      // the demo figurine shares one body material) — only dispose materials this part actually
+      // owns exclusively, or a still-visible sibling would lose its material out from under it.
+      // Geometry is never shared between separate parts, so that's always safe to free.
+      const candidateMaterials = new Set<THREE.Material>();
+      collectMeshMaterials(part.object, candidateMaterials);
+
+      part.object.parent?.remove(part.object);
+      batchPartsRef.current.splice(index, 1);
+
+      part.object.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (mesh.isMesh) mesh.geometry?.dispose();
+      });
+
+      if (currentModelRef.current) {
+        const stillUsed = new Set<THREE.Material>();
+        collectMeshMaterials(currentModelRef.current, stillUsed);
+        candidateMaterials.forEach((m) => {
+          if (!stillUsed.has(m)) m.dispose();
+        });
+
+        recalculateBounds();
+        updateGrid();
+        const { meshCount } = computeVolumeAndWatertight(currentModelRef.current);
+        const partCount = batchPartsRef.current.length > 0 ? batchPartsRef.current.length : 1;
+        refreshVolumeStats(Math.max(partCount, meshCount > 0 ? 1 : 0));
+      } else {
+        candidateMaterials.forEach((m) => m.dispose());
+      }
+      notifyPartsChanged();
+      requestRender();
+    };
+
     // Load sample default model
     const loadDemoModel = async () => {
       setIsLoading(true);
@@ -1652,12 +1746,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const torsoGeo = new THREE.CylinderGeometry(14, 18, 36, 32);
       const torso = new THREE.Mesh(torsoGeo, bodyMat);
       torso.position.y = 18;
+      torso.name = 'Torso';
       group.add(torso);
 
       // Head
       const headGeo = new THREE.SphereGeometry(16, 32, 32);
       const head = new THREE.Mesh(headGeo, bodyMat);
       head.position.y = 48;
+      head.name = 'Head';
       group.add(head);
 
       // Ears/Antennae
@@ -1665,11 +1761,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const earL = new THREE.Mesh(earGeo, bodyMat);
       earL.position.set(-11, 62, 0);
       earL.rotation.z = 0.3;
+      earL.name = 'Ear (Left)';
       group.add(earL);
 
       const earR = new THREE.Mesh(earGeo, bodyMat);
       earR.position.set(11, 62, 0);
       earR.rotation.z = -0.3;
+      earR.name = 'Ear (Right)';
       group.add(earR);
 
       // Limbs
@@ -1677,17 +1775,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const armL = new THREE.Mesh(armGeo, bodyMat);
       armL.position.set(-20, 20, 0);
       armL.rotation.z = 0.4;
+      armL.name = 'Arm (Left)';
       group.add(armL);
 
       const armR = new THREE.Mesh(armGeo, bodyMat);
       armR.position.set(20, 20, 0);
       armR.rotation.z = -0.4;
+      armR.name = 'Arm (Right)';
       group.add(armR);
 
       // Base stand
       const baseGeo = new THREE.CylinderGeometry(28, 30, 6, 48);
       const base = new THREE.Mesh(baseGeo, bodyMat);
       base.position.y = -3;
+      base.name = 'Base';
       group.add(base);
 
       group.traverse((c) => {
@@ -1699,6 +1800,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         }
       });
 
+      detectExplodableParts(group);
       currentModelRef.current = group;
       if (sceneRef.current) sceneRef.current.add(group);
       onModelLoadedHandler('Jazwares_Showcase_Figurine.glb');
@@ -2160,6 +2262,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       exportTurnaroundImage,
       exportTurntableVideo,
       updateDimension,
+      togglePartVisibility,
+      deletePart,
     }));
 
     // Initialize Three.js scene
@@ -2292,8 +2396,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       applyShadowSettings();
       applyEnvironment();
 
-      // Post-processing pipeline: background/vignette backdrop -> scene -> SSAO -> AA -> output.
-      // Always used (see renderFrame) — SSAO/FXAA/SMAA are simply disabled passes when their
+      // Post-processing pipeline: background/vignette backdrop -> scene -> AO -> AA -> output.
+      // Always used (see renderFrame) — AO/FXAA/SMAA are simply disabled passes when their
       // setting is off, which the composer skips entirely, so there's no real cost to always
       // running the pipeline, and it guarantees OutputPass always applies correct color-space
       // encoding to the composited result.
@@ -2309,27 +2413,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       composer.addPass(renderPass);
       renderPassRef.current = renderPass;
 
-      const ssaoPass = new SSAOPass(scene, activeCamera, container.clientWidth, container.clientHeight);
-      ssaoPass.enabled = settings.ssaoEnabled;
-
-      // three's SSAOShader has no strength/intensity control, only the raw 0-1 occlusion value
-      // it computes — patch in a uIntensity uniform so the strength slider actually does
-      // something instead of just being along for the ride with radius.
-      const ssaoUniforms = ssaoPass.ssaoMaterial.uniforms as Record<string, THREE.IUniform>;
-      ssaoUniforms.uIntensity = { value: 1.0 };
-      ssaoPass.ssaoMaterial.fragmentShader = ssaoPass.ssaoMaterial.fragmentShader
-        .replace(
-          'uniform float maxDistance;',
-          'uniform float maxDistance;\n\t\tuniform float uIntensity;'
-        )
-        .replace(
-          'occlusion = clamp( occlusion / float( KERNEL_SIZE ), 0.0, 1.0 );',
-          'occlusion = clamp( ( occlusion / float( KERNEL_SIZE ) ) * uIntensity, 0.0, 1.0 );'
-        );
-      ssaoPass.ssaoMaterial.needsUpdate = true;
-
-      composer.addPass(ssaoPass);
-      ssaoPassRef.current = ssaoPass;
+      // GTAO (horizon-based) instead of classic SSAO: SSAO's random hemisphere sampling plus
+      // its blur pass tended to produce a flat haze over the whole mesh rather than tracing
+      // into actual creases. GTAO searches along the true surface horizon per-pixel, which
+      // reads as real contact shadow depth in crevices instead of a uniform darkening pass.
+      const aoPass = new GTAOPass(scene, activeCamera, container.clientWidth, container.clientHeight);
+      aoPass.enabled = settings.ssaoEnabled;
+      aoPass.output = GTAOPass.OUTPUT.Default;
+      composer.addPass(aoPass);
+      aoPassRef.current = aoPass;
 
       const fxaaPass = new ShaderPass(FXAAShader);
       fxaaPass.enabled = settings.antialiasMode === 'fxaa';
@@ -2362,7 +2454,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
         rendererRef.current.setSize(w, h, true);
         if (composerRef.current) composerRef.current.setSize(w, h);
-        if (ssaoPassRef.current) ssaoPassRef.current.setSize(w, h);
+        if (aoPassRef.current) aoPassRef.current.setSize(w, h);
         if (smaaPassRef.current) smaaPassRef.current.setSize(w * renderer.getPixelRatio(), h * renderer.getPixelRatio());
         syncPostProcessing();
         if (activeCameraRef.current) {
@@ -2492,7 +2584,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       settings.castShadows,
       settings.opacityPercent,
       settings.wireframeColorHex,
-      settings.matteColorHex,
+      settings.customColorHex,
+      settings.customRoughnessPercent,
+      settings.customMetalnessPercent,
       settings.sketchColorHex,
       settings.sketchHighlightColorHex,
       settings.sketchShadowColorHex,

@@ -9,6 +9,7 @@ import { ThreeViewport, ThreeViewportHandle, VolumeStats } from './components/Th
 import { DriveModal } from './components/DriveModal';
 import {
   DriveSaveOptions,
+  LoadedPart,
   ModelDimensions,
   ResolutionOption,
   SnapDirection,
@@ -48,7 +49,9 @@ export default function App() {
 
     opacityPercent: 100,
     wireframeColorHex: '#38bdf8',
-    matteColorHex: '#9a9a9a',
+    customColorHex: '#9a9a9a',
+    customRoughnessPercent: 95,
+    customMetalnessPercent: 0,
     sketchColorHex: '#94a3b8',
     sketchHighlightColorHex: '#e2e8f0',
     sketchShadowColorHex: '#334155',
@@ -91,7 +94,7 @@ export default function App() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [volumeStats, setVolumeStats] = useState<VolumeStats | null>(null);
-  const [batchPartCount, setBatchPartCount] = useState(1);
+  const [parts, setParts] = useState<LoadedPart[]>([]);
 
   // Export State
   const [isExportingImage, setIsExportingImage] = useState(false);
@@ -134,6 +137,14 @@ export default function App() {
 
   const handleUploadBatchFiles = (files: File[]) => {
     viewportRef.current?.loadModelsFromFiles(files);
+  };
+
+  const handleTogglePartVisibility = (index: number) => {
+    viewportRef.current?.togglePartVisibility(index);
+  };
+
+  const handleDeletePart = (index: number) => {
+    viewportRef.current?.deletePart(index);
   };
 
   const handleOpenDriveModal = (mode: 'import') => {
@@ -377,7 +388,9 @@ export default function App() {
         isOpenOnMobile={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
         volumeStats={volumeStats}
-        batchPartCount={batchPartCount}
+        parts={parts}
+        onTogglePartVisibility={handleTogglePartVisibility}
+        onDeletePart={handleDeletePart}
       />
 
       {/* 3D Viewport */}
@@ -397,7 +410,7 @@ export default function App() {
           }}
           onOpenDriveModal={() => handleOpenDriveModal('import')}
           onVolumeComputed={setVolumeStats}
-          onBatchInfoChanged={setBatchPartCount}
+          onPartsChanged={setParts}
         />
       </main>
 

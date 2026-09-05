@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
+  LoadedPart,
   MaterialKey,
   ModelDimensions,
   ResolutionOption,
@@ -17,6 +18,7 @@ import {
   Moon,
   RotateCw,
   Sun,
+  Trash2,
   Upload,
   Video,
   FileImage,
@@ -57,7 +59,9 @@ interface SidebarProps {
   isOpenOnMobile: boolean;
   onCloseMobile: () => void;
   volumeStats: VolumeStats | null;
-  batchPartCount: number;
+  parts: LoadedPart[];
+  onTogglePartVisibility: (index: number) => void;
+  onDeletePart: (index: number) => void;
 }
 
 interface DimensionInputProps {
@@ -231,7 +235,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpenOnMobile,
   onCloseMobile,
   volumeStats,
-  batchPartCount,
+  parts,
+  onTogglePartVisibility,
+  onDeletePart,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const batchInputRef = useRef<HTMLInputElement>(null);
@@ -239,6 +245,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [isClippingOpen, setIsClippingOpen] = useState(false);
   const [isPostProcessingOpen, setIsPostProcessingOpen] = useState(false);
   const [isVolumeOpen, setIsVolumeOpen] = useState(false);
+  const [isLoadedMeshesOpen, setIsLoadedMeshesOpen] = useState(false);
   const [showExportDriveMenu, setShowExportDriveMenu] = useState(false);
 
   const isLight = theme === 'light';
@@ -375,7 +382,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v0.88
+                  v0.89
                 </span>
               </span>
             </div>
@@ -661,6 +668,68 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
           </div>
 
+          {/* EXPLODED VIEW + LOADED MESHES — only relevant once a model actually has multiple
+              separable parts (a batch-loaded assembly, or a GLB whose top-level nodes are
+              separable meshes) */}
+          {parts.length > 1 && (
+            <div
+              className={`p-3 rounded-lg border flex flex-col gap-2.5 ${
+                isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
+              }`}
+            >
+              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                Exploded View
+              </div>
+              <div className="flex flex-col gap-1 text-xs">
+                <div className="flex items-center justify-between">
+                  <span>{parts.length} parts</span>
+                  <span className="font-mono text-sky-400">
+                    {Math.round(settings.explodeAmount * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={Math.round(settings.explodeAmount * 100)}
+                  onChange={(e) => onUpdateSettings({ explodeAmount: Number(e.target.value) / 100 })}
+                  className="w-full accent-sky-500 cursor-pointer"
+                />
+              </div>
+
+              <AccordionSection
+                title="Loaded Meshes"
+                isOpen={isLoadedMeshesOpen}
+                onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
+                bordered
+                isLight={isLight}
+              >
+                {parts.map((part, i) => (
+                  <div key={`${part.name}-${i}`} className="flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 min-w-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={part.visible}
+                        onChange={() => onTogglePartVisibility(i)}
+                        className="accent-sky-500 w-4 h-4 cursor-pointer shrink-0"
+                      />
+                      <span className="truncate" title={part.name}>
+                        {part.name}
+                      </span>
+                    </label>
+                    <button
+                      onClick={() => onDeletePart(i)}
+                      title="Remove this part from the scene and free its memory"
+                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </AccordionSection>
+            </div>
+          )}
+
           {/* EXPORT PANEL */}
           <div
             className={`p-3 rounded-lg border flex flex-col gap-2.5 ${
@@ -820,11 +889,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 >
                   <option value="original">Mapped/Vertex Color</option>
                   <option value="grey">Grey Clay (50% Roughness)</option>
-                  <option value="matteGrey">Matte</option>
-                  <option value="redClay">Red Clay</option>
-                  <option value="gold">Reflective Metal (Gold)</option>
-                  <option value="chrome">Glossy Chrome</option>
-                  <option value="pearl">Pearl (ZBrush-style)</option>
+                  <option value="custom">Custom</option>
                   <option value="normal">Normal Map High-Color</option>
                   <option value="wireframe">Wireframe</option>
                   <option value="sketch">Sketch / Cel-Shaded</option>
@@ -844,15 +909,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </div>
                 )}
 
-                {settings.material === 'matteGrey' && (
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400">Matte Color</span>
-                    <input
-                      type="color"
-                      value={settings.matteColorHex}
-                      onChange={(e) => onUpdateSettings({ matteColorHex: e.target.value })}
-                      className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                    />
+                {/* Custom: stands in for what used to be separate Gold/Chrome/Red Clay/Pearl
+                    presets — pick a color and dial roughness/metalness to recreate any of them
+                    (glossy metal: low roughness + high metalness; matte clay: high roughness +
+                    zero metalness; chrome: near-zero roughness + full metalness). */}
+                {settings.material === 'custom' && (
+                  <div className="flex flex-col gap-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Color</span>
+                      <input
+                        type="color"
+                        value={settings.customColorHex}
+                        onChange={(e) => onUpdateSettings({ customColorHex: e.target.value })}
+                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Roughness</span>
+                        <span className="font-mono text-sky-400">{settings.customRoughnessPercent}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={settings.customRoughnessPercent}
+                        onChange={(e) => onUpdateSettings({ customRoughnessPercent: Number(e.target.value) })}
+                        className="w-full accent-sky-500 cursor-pointer"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Metalness</span>
+                        <span className="font-mono text-sky-400">{settings.customMetalnessPercent}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={settings.customMetalnessPercent}
+                        onChange={(e) => onUpdateSettings({ customMetalnessPercent: Number(e.target.value) })}
+                        className="w-full accent-sky-500 cursor-pointer"
+                      />
+                    </div>
                   </div>
                 )}
 
@@ -1205,7 +1304,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   isLight={isLight}
                 >
                   <label className="flex items-center justify-between cursor-pointer">
-                    <span>SSAO (Ambient Occlusion)</span>
+                    <span>Ambient Occlusion</span>
                     <input
                       type="checkbox"
                       checked={settings.ssaoEnabled}
@@ -1403,26 +1502,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       >
                         NOTE: the size noted above is based on original input only, not the rotated
                         value!
-                      </div>
-                    )}
-
-                    {/* Exploded View — only meaningful for batch-loaded multi-part assemblies */}
-                    {batchPartCount > 1 && (
-                      <div className="flex flex-col gap-1 pt-1.5 border-t border-slate-700/40">
-                        <div className="flex items-center justify-between text-xs">
-                          <span>Exploded View ({batchPartCount} parts)</span>
-                          <span className="font-mono text-sky-400">
-                            {Math.round(settings.explodeAmount * 100)}%
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={Math.round(settings.explodeAmount * 100)}
-                          onChange={(e) => onUpdateSettings({ explodeAmount: Number(e.target.value) / 100 })}
-                          className="w-full accent-sky-500 cursor-pointer"
-                        />
                       </div>
                     )}
 
