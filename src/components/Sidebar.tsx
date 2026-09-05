@@ -357,6 +357,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     });
   };
 
+  const handleShowAllParts = () => {
+    parts.forEach((part, i) => {
+      if (!part.visible) onTogglePartVisibility(i);
+    });
+  };
+
   const hasRotations = dimensions.rotX !== 0 || dimensions.rotY !== 0 || dimensions.rotZ !== 0;
 
   return (
@@ -391,7 +397,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v0.95
+                  v0.96
                 </span>
               </span>
             </div>
@@ -489,13 +495,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
                 isLight={isLight}
                 headerExtra={
-                  <button
-                    onClick={handleHideAllParts}
-                    title="Hide every loaded part"
-                    className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap"
-                  >
-                    Hide All
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleShowAllParts}
+                      title="Show every loaded part"
+                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap"
+                    >
+                      Show All
+                    </button>
+                    <button
+                      onClick={handleHideAllParts}
+                      title="Hide every loaded part"
+                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap"
+                    >
+                      Hide All
+                    </button>
+                  </div>
                 }
               >
                 {parts.map((part, i) => (
