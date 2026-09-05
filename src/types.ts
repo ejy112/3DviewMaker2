@@ -11,12 +11,8 @@ export type SnapDirection =
 export type MaterialKey =
   | 'original'
   | 'grey'
-  | 'gold'
   | 'thickness'
-  | 'redClay'
-  | 'chrome'
-  | 'matteGrey'
-  | 'pearl'
+  | 'custom'
   | 'normal'
   | 'wireframe'
   | 'sketch'
@@ -46,6 +42,13 @@ export interface ClippingSettings {
   x: ClippingPlaneSetting; // Left / Right
   y: ClippingPlaneSetting; // Top / Bottom
   z: ClippingPlaneSetting; // Front / Back
+}
+
+// One entry per top-level separable part of the loaded model (batch-loaded files, or the
+// top-level nodes of a multi-mesh GLB) — lets the sidebar list/toggle/delete them individually.
+export interface LoadedPart {
+  name: string;
+  visible: boolean;
 }
 
 export interface ModelDimensions {
@@ -88,7 +91,11 @@ export interface ViewerSettings {
   // Lookdev extras
   opacityPercent: number; // "ghost" slider, applies to any material
   wireframeColorHex: string;
-  matteColorHex: string;
+  // "Custom" material: color/roughness/metalness sliders stand in for what used to be separate
+  // fixed Gold/Chrome/Red Clay/Pearl presets — pick a color and dial the other two to taste.
+  customColorHex: string;
+  customRoughnessPercent: number;
+  customMetalnessPercent: number;
   // Cel-shaded tri-tone: sketchColorHex is the midtone, the other two are the lit/shadowed bands
   sketchColorHex: string;
   sketchHighlightColorHex: string;
