@@ -48,7 +48,10 @@ export default function App() {
 
     opacityPercent: 100,
     wireframeColorHex: '#38bdf8',
+    matteColorHex: '#9a9a9a',
     sketchColorHex: '#94a3b8',
+    sketchHighlightColorHex: '#e2e8f0',
+    sketchShadowColorHex: '#334155',
 
     environmentPreset: 'studio',
 
@@ -60,9 +63,9 @@ export default function App() {
 
     antialiasMode: 'none',
     ssaoEnabled: false,
-    ssaoRadius: 16,
-    ssaoIntensity: 1,
-    ssaoBias: 0.5,
+    ssaoRadius: 20, // % of the model's radius — keeps AO detail scale-correct across unit systems
+    ssaoIntensity: 120, // % strength, 100 = neutral
+    ssaoBias: 20, // % — trades self-occlusion noise vs. missed fine detail
 
     materialDensityGCm3: 1.04, // ABS-ish default
     costPerKgUSD: 25,

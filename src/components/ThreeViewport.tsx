@@ -20,11 +20,18 @@ import { Pass, FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js'
 // pixels ever show the vignette (mesh, video, and image output all stay unaffected).
 class VignetteBackgroundPass extends Pass {
   quad: FullScreenQuad;
-  needsSwap: boolean = false;
+  // true: after this pass writes into `writeBuffer`, the composer swaps its read/write
+  // pointers so the NEXT pass (RenderPass) reads from the buffer we just painted into —
+  // matching RenderPass's own convention of rendering into "readBuffer" when it isn't the
+  // final pass. Leaving this false (as it originally was) meant RenderPass drew the model
+  // into the *other* ping-pong buffer, one still holding a previous frame's content that
+  // was never cleared (RenderPass.clear is intentionally false so it doesn't erase the
+  // vignette) — producing a trail of stale frames ("ghosting") once any post-processing
+  // pass was enabled, since only the composer path exercises this buffer chain at all.
+  needsSwap: boolean = true;
   renderToScreen: boolean = false;
   constructor(material: THREE.Material) {
     super();
-    this.needsSwap = false;
     this.quad = new FullScreenQuad(material);
   }
   render(renderer: THREE.WebGLRenderer, writeBuffer: any) {
@@ -137,9 +144,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const dirLight1Ref = useRef<THREE.DirectionalLight | null>(null);
     const dirLight2Ref = useRef<THREE.DirectionalLight | null>(null);
 
-    // Vignette Backdrop Scene & Material (rendered BEHIND the model, background-only)
-    const vignetteSceneRef = useRef<THREE.Scene | null>(null);
-    const vignetteCameraRef = useRef<THREE.OrthographicCamera | null>(null);
+    // Vignette Backdrop Material (rendered BEHIND the model, background-only, via
+    // VignetteBackgroundPass in the composer chain — see renderFrame)
     const vignetteMaterialRef = useRef<THREE.ShaderMaterial | null>(null);
 
     // Post-processing
@@ -237,6 +243,45 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       })
     );
 
+    // Cel-shaded (sketch) tri-tone material: hard bands between a shadow, midtone, and
+    // highlight color based on N·L, rather than MeshToonMaterial's single-hue gradient map.
+    const sketchMaterialRef = useRef<THREE.ShaderMaterial>(
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uBaseColor: { value: new THREE.Color(0x94a3b8) },
+          uHighlightColor: { value: new THREE.Color(0xe2e8f0) },
+          uShadowColor: { value: new THREE.Color(0x334155) },
+          uLightDir: { value: new THREE.Vector3(0.5, 1.0, 0.8).normalize() },
+        },
+        vertexShader: `
+          varying vec3 vNormal;
+
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 uBaseColor;
+          uniform vec3 uHighlightColor;
+          uniform vec3 uShadowColor;
+          uniform vec3 uLightDir;
+          varying vec3 vNormal;
+
+          void main() {
+            vec3 norm = normalize(vNormal);
+            if (!gl_FrontFacing) norm = -norm;
+            float ndl = dot(norm, uLightDir);
+
+            vec3 col = mix(uShadowColor, uBaseColor, step(-0.15, ndl));
+            col = mix(col, uHighlightColor, step(0.35, ndl));
+            gl_FragColor = vec4(col, 1.0);
+          }
+        `,
+        side: THREE.FrontSide,
+      })
+    );
+
     // Volume / watertightness (unscaled — multiplied by scaleFactor^3 on demand)
     const unscaledVolumeCm3Ref = useRef<number>(0);
     const isWatertightRef = useRef<boolean>(true);
@@ -318,16 +363,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       return tex;
     };
 
-    // Toon gradient map for sketch/cel-shaded mode (3-step banding)
-    const toonGradientMapRef = useRef<THREE.DataTexture>(
-      (() => {
-        const colors = new Uint8Array([64, 128, 200, 255]);
-        const tex = new THREE.DataTexture(colors, colors.length, 1, THREE.RedFormat);
-        tex.needsUpdate = true;
-        return tex;
-      })()
-    );
-
     // Materials map — LookDev presets
     const materialsMap = useRef<{
       grey: THREE.MeshStandardMaterial;
@@ -338,7 +373,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       pearl: THREE.MeshPhysicalMaterial;
       normal: THREE.MeshNormalMaterial;
       wireframe: THREE.MeshBasicMaterial;
-      sketch: THREE.MeshToonMaterial;
+      sketch: THREE.ShaderMaterial;
       matcapZebra: THREE.MeshMatcapMaterial;
     }>({
       grey: new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.5, metalness: 0.1 }),
@@ -348,16 +383,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       matteGrey: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.95, metalness: 0.0 }),
       pearl: new THREE.MeshPhysicalMaterial({
         color: 0xf3eef2,
-        roughness: 0.25,
-        metalness: 0.1,
-        clearcoat: 1.0,
-        clearcoatRoughness: 0.2,
-        iridescence: 0.6,
+        // Softer roughness + a milder clearcoat/iridescence than the original preset: at full
+        // strength this stacked three separate bright specular responses (base, clearcoat,
+        // iridescence) that clipped to a blown-out white blob before tone mapping was added,
+        // and still looked harsh once it was.
+        roughness: 0.4,
+        metalness: 0.05,
+        clearcoat: 0.6,
+        clearcoatRoughness: 0.35,
+        iridescence: 0.35,
         iridescenceIOR: 1.3,
+        iridescenceThicknessRange: [100, 400],
       }),
       normal: new THREE.MeshNormalMaterial({ flatShading: false }),
       wireframe: new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true }),
-      sketch: new THREE.MeshToonMaterial({ color: 0x94a3b8, gradientMap: toonGradientMapRef.current }),
+      sketch: sketchMaterialRef.current,
       matcapZebra: new THREE.MeshMatcapMaterial({ color: 0xffffff }),
     });
 
@@ -404,12 +444,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       cam.updateMatrixWorld(true);
       const rad = modelRadiusRef.current || 1;
 
-      if (thicknessMaterialRef.current) {
+      if (thicknessMaterialRef.current || sketchMaterialRef.current) {
         const lightCamDir = new THREE.Vector3(0.5, 1.0, 0.8).normalize();
         if (isLocked) {
           lightCamDir.applyQuaternion(cam.quaternion);
         }
-        thicknessMaterialRef.current.uniforms.uLightDir.value.copy(lightCamDir);
+        thicknessMaterialRef.current?.uniforms.uLightDir.value.copy(lightCamDir);
+        sketchMaterialRef.current?.uniforms.uLightDir.value.copy(lightCamDir);
       }
 
       if (isLocked) {
@@ -551,13 +592,33 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
     // Keep post-processing passes (SSAO, FXAA/SMAA) in sync with settings
     const syncPostProcessing = () => {
-      const { ssaoEnabled, ssaoRadius, antialiasMode } = settingsRef.current;
+      const { ssaoEnabled, ssaoRadius, ssaoIntensity, ssaoBias, antialiasMode } = settingsRef.current;
 
       if (ssaoPassRef.current) {
         ssaoPassRef.current.enabled = ssaoEnabled;
-        ssaoPassRef.current.kernelRadius = Math.max(1, ssaoRadius);
-        ssaoPassRef.current.minDistance = 0.0005;
-        ssaoPassRef.current.maxDistance = Math.max(0.02, ssaoRadius / 200);
+
+        // kernelRadius is a raw scene-unit distance, not normalized to the model at all — a
+        // fixed number here means the exact same setting looks like fine detail on a model
+        // imported in millimeters and one big blurry blob on the same model imported in meters.
+        // Scaling it to the model's own bounding radius keeps the slider meaning the same
+        // ("% of the object") regardless of the file's native unit scale.
+        const modelRadius = modelRadiusRef.current || 1;
+        const radiusFrac = Math.max(1, ssaoRadius) / 100;
+        ssaoPassRef.current.kernelRadius = modelRadius * radiusFrac * 0.35;
+
+        // Bias controls minDistance (how far a neighboring sample must be before it's allowed
+        // to occlude) — too low and flat surfaces get noisy self-occlusion speckle, too high and
+        // fine crevices stop registering. maxDistance follows it so raising bias doesn't also
+        // cut off the far end of the occlusion range.
+        const biasFrac = Math.max(0, Math.min(100, ssaoBias)) / 100;
+        const minDistance = 0.0005 + biasFrac * 0.008;
+        ssaoPassRef.current.minDistance = minDistance;
+        ssaoPassRef.current.maxDistance = Math.max(minDistance * 6, 0.02 + biasFrac * 0.03);
+
+        const ssaoUniforms = ssaoPassRef.current.ssaoMaterial.uniforms as Record<string, THREE.IUniform>;
+        if (ssaoUniforms.uIntensity) {
+          ssaoUniforms.uIntensity.value = Math.max(0, ssaoIntensity) / 100;
+        }
       }
 
       if (fxaaPassRef.current && containerRef.current && rendererRef.current) {
@@ -574,29 +635,27 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
     };
 
-    const usesPostProcessing = () =>
-      settingsRef.current.ssaoEnabled || settingsRef.current.antialiasMode !== 'none';
-
     // Shared frame renderer — used by the live view AND the turntable video exporter so both
     // paths treat the background/vignette backdrop and post-processing identically.
+    //
+    // Always renders through the EffectComposer, even when SSAO and AA are both off (disabled
+    // passes are free — the composer skips them entirely). This used to be an either/or: go
+    // through the composer, or render the scene directly with the vignette backdrop drawn as a
+    // separate pre-pass. The direct path never ran the final OutputPass, which is what converts
+    // the linear-space color math in the vignette shader back to the display's sRGB encoding —
+    // so with SSAO and AA both off, the background rendered dark/uncorrected while the model
+    // itself (drawn with standard materials that self-encode) looked fine. One always-composer
+    // path means OutputPass always runs exactly once, for both the background and the model.
     const renderFrame = (cam: THREE.Camera, withViewHelper: boolean) => {
       const renderer = rendererRef.current;
-      const scene = sceneRef.current;
-      if (!renderer || !scene) return;
+      const composer = composerRef.current;
+      if (!renderer || !composer || !renderPassRef.current) return;
 
-      if (usesPostProcessing() && composerRef.current && renderPassRef.current) {
-        if (renderPassRef.current.camera !== cam) renderPassRef.current.camera = cam as any;
-        if (ssaoPassRef.current && (ssaoPassRef.current as any).camera !== cam) {
-          (ssaoPassRef.current as any).camera = cam;
-        }
-        composerRef.current.render();
-      } else {
-        renderer.clear();
-        if (vignetteSceneRef.current && vignetteCameraRef.current) {
-          renderer.render(vignetteSceneRef.current, vignetteCameraRef.current);
-        }
-        renderer.render(scene, cam);
+      if (renderPassRef.current.camera !== cam) renderPassRef.current.camera = cam as any;
+      if (ssaoPassRef.current && (ssaoPassRef.current as any).camera !== cam) {
+        (ssaoPassRef.current as any).camera = cam;
       }
+      composer.render();
 
       if (withViewHelper) {
         renderer.clearDepth();
@@ -725,6 +784,23 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // Cheap, high-frequency-safe: mutates the three clip planes in place from current settings
     // and only reassigns materials (+ forces a shader recompile) when a plane is actually
     // added or removed, never when an already-enabled plane's offset/flip is being dragged.
+    // A clip plane only cuts the *outward-facing* surface away; without also drawing backfaces,
+    // the hollow interior it exposes has nothing rendered on it (backface culling removes the
+    // triangles you'd now be looking at from inside), so the cut looks like it's showing through
+    // to nothing. Flip to DoubleSide (with the original side value remembered for restore) only
+    // while at least one clip plane is enabled.
+    const applyClipSideToMaterial = (mat: THREE.Material, clippingActive: boolean) => {
+      if (clippingActive) {
+        if (mat.userData.__preClipSide === undefined) {
+          mat.userData.__preClipSide = mat.side;
+        }
+        mat.side = THREE.DoubleSide;
+      } else if (mat.userData.__preClipSide !== undefined) {
+        mat.side = mat.userData.__preClipSide;
+        delete mat.userData.__preClipSide;
+      }
+    };
+
     const updateClippingPlanes = () => {
       const { clipping } = settingsRef.current;
       const inchesToUnits = 1 / getConversionToInches();
@@ -746,17 +822,29 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
 
       activeClipPlanesRef.current = activeClipPlanes;
+      const nextClippingPlanes = activeClipPlanes.length > 0 ? activeClipPlanes : null;
       const signature = `${clipping.x.enabled ? 1 : 0}${clipping.y.enabled ? 1 : 0}${clipping.z.enabled ? 1 : 0}`;
       const countChanged = signature !== clipSignatureRef.current;
       clipSignatureRef.current = signature;
 
+      // SSAOPass computes ambient occlusion from its own override material (a plain
+      // MeshNormalMaterial swapped in for every mesh via scene.overrideMaterial), which never
+      // saw our per-mesh clippingPlanes assignment below — so without this, SSAO "sees" and
+      // shades the geometry that clipping is supposed to have cut away, showing up as a ghosted
+      // blob of occlusion/shadow hanging past the visible cut surface.
+      if (ssaoPassRef.current) {
+        ssaoPassRef.current.normalMaterial.clippingPlanes = nextClippingPlanes;
+      }
+
       if (countChanged && currentModelRef.current) {
+        const clippingActive = activeClipPlanes.length > 0;
         currentModelRef.current.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
             const mesh = child as THREE.Mesh;
             const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
             mats.forEach((m) => {
-              m.clippingPlanes = activeClipPlanes.length > 0 ? activeClipPlanes : null;
+              m.clippingPlanes = nextClippingPlanes;
+              applyClipSideToMaterial(m, clippingActive);
               m.needsUpdate = true;
             });
           }
@@ -773,7 +861,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         minThicknessInches,
         opacityPercent,
         wireframeColorHex,
+        matteColorHex,
         sketchColorHex,
+        sketchHighlightColorHex,
+        sketchShadowColorHex,
       } = settingsRef.current;
 
       if (dirLight1Ref.current) dirLight1Ref.current.castShadow = castShadows;
@@ -785,7 +876,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       // Keep lookdev preset styling in sync with their controls
       materialsMap.current.wireframe.color.set(wireframeColorHex);
-      materialsMap.current.sketch.color.set(sketchColorHex);
+      materialsMap.current.matteGrey.color.set(matteColorHex);
+      sketchMaterialRef.current.uniforms.uBaseColor.value.set(sketchColorHex);
+      sketchMaterialRef.current.uniforms.uHighlightColor.value.set(sketchHighlightColorHex);
+      sketchMaterialRef.current.uniforms.uShadowColor.value.set(sketchShadowColorHex);
       if (!matcapZebraTextureRef.current) {
         matcapZebraTextureRef.current = generateZebraMatcap();
         materialsMap.current.matcapZebra.matcap = matcapZebraTextureRef.current;
@@ -798,6 +892,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       const opacity = Math.max(0, Math.min(1, opacityPercent / 100));
       const isGhost = opacity < 0.999;
+      const clippingActive = activeClipPlanes.length > 0;
 
       currentModelRef.current.traverse((child) => {
         if ((child as THREE.Mesh).isMesh) {
@@ -823,6 +918,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
               const clipPlanesChanged = mat.clippingPlanes !== nextClippingPlanes;
               mat.clippingPlanes = nextClippingPlanes;
               mat.clipShadows = true;
+              applyClipSideToMaterial(mat, clippingActive);
 
               const wasTransparent = mat.transparent;
               if (isGhost) {
@@ -996,6 +1092,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       controlsRef.current.update();
       updateGrid();
       updateLights(cam);
+      // SSAO's kernel radius is derived from modelRadiusRef (see syncPostProcessing) so it stays
+      // proportional to the model instead of being a fixed, scale-dependent number — re-sync
+      // whenever the model's bounds (and therefore its radius) may have just changed.
+      syncPostProcessing();
       requestRender();
     };
 
@@ -2088,6 +2188,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       renderer.shadowMap.enabled = true;
       renderer.localClippingEnabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      // Filmic tone mapping compresses HDR environment reflections (metals, clearcoat, the
+      // Pearl preset's iridescence) into displayable range instead of hard-clipping them to
+      // flat white — without this, any material with a bright specular/env response blows out.
+      // Safe to always run through the composer's OutputPass (see renderFrame): three.js only
+      // applies tone mapping when rendering straight to the screen, never to the intermediate
+      // render targets passes render into, so there's no risk of it compounding per-pass.
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
       rendererRef.current = renderer;
 
       const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -2128,12 +2236,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       };
       canvas.addEventListener('pointerdown', handlePointerDown);
 
-      // Background/Vignette backdrop — drawn FIRST as an opaque full-screen plate, smoothstepping
-      // from the background color (center) to the vignette color (edges). The 3D scene is drawn
-      // on top of this with normal depth testing, so the vignette only ever shows through where
-      // there is no model geometry — it never darkens or tints the mesh itself.
-      const vignetteScene = new THREE.Scene();
-      const vignetteCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      // Background/Vignette backdrop — drawn FIRST (as VignetteBackgroundPass, an opaque
+      // full-screen plate smoothstepping from the background color at center to the vignette
+      // color at the edges) into the composer's chain. The 3D scene is drawn on top of this
+      // with normal depth testing, so the vignette only ever shows through where there is no
+      // model geometry — it never darkens or tints the mesh itself.
       const vignetteMaterial = new THREE.ShaderMaterial({
         uniforms: {
           bgColor: { value: new THREE.Color(settings.backgroundColorHex) },
@@ -2162,10 +2269,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         depthWrite: false,
         depthTest: false,
       });
-      const vignetteQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), vignetteMaterial);
-      vignetteScene.add(vignetteQuad);
-      vignetteSceneRef.current = vignetteScene;
-      vignetteCameraRef.current = vignetteCamera;
       vignetteMaterialRef.current = vignetteMaterial;
 
       // Lights
@@ -2190,8 +2293,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       applyEnvironment();
 
       // Post-processing pipeline: background/vignette backdrop -> scene -> SSAO -> AA -> output.
-      // Only actually used when SSAO or an AA mode is enabled (see usesPostProcessing/renderFrame);
-      // otherwise the simpler direct render path below runs, at lower cost.
+      // Always used (see renderFrame) — SSAO/FXAA/SMAA are simply disabled passes when their
+      // setting is off, which the composer skips entirely, so there's no real cost to always
+      // running the pipeline, and it guarantees OutputPass always applies correct color-space
+      // encoding to the composited result.
       const composer = new EffectComposer(renderer);
       composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       composer.setSize(container.clientWidth, container.clientHeight);
@@ -2206,6 +2311,23 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       const ssaoPass = new SSAOPass(scene, activeCamera, container.clientWidth, container.clientHeight);
       ssaoPass.enabled = settings.ssaoEnabled;
+
+      // three's SSAOShader has no strength/intensity control, only the raw 0-1 occlusion value
+      // it computes — patch in a uIntensity uniform so the strength slider actually does
+      // something instead of just being along for the ride with radius.
+      const ssaoUniforms = ssaoPass.ssaoMaterial.uniforms as Record<string, THREE.IUniform>;
+      ssaoUniforms.uIntensity = { value: 1.0 };
+      ssaoPass.ssaoMaterial.fragmentShader = ssaoPass.ssaoMaterial.fragmentShader
+        .replace(
+          'uniform float maxDistance;',
+          'uniform float maxDistance;\n\t\tuniform float uIntensity;'
+        )
+        .replace(
+          'occlusion = clamp( occlusion / float( KERNEL_SIZE ), 0.0, 1.0 );',
+          'occlusion = clamp( ( occlusion / float( KERNEL_SIZE ) ) * uIntensity, 0.0, 1.0 );'
+        );
+      ssaoPass.ssaoMaterial.needsUpdate = true;
+
       composer.addPass(ssaoPass);
       ssaoPassRef.current = ssaoPass;
 
@@ -2370,7 +2492,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       settings.castShadows,
       settings.opacityPercent,
       settings.wireframeColorHex,
+      settings.matteColorHex,
       settings.sketchColorHex,
+      settings.sketchHighlightColorHex,
+      settings.sketchShadowColorHex,
       settings.minThicknessInches,
     ]);
 
@@ -2405,7 +2530,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     useEffect(() => {
       syncPostProcessing();
       requestRender();
-    }, [settings.ssaoEnabled, settings.ssaoRadius, settings.antialiasMode]);
+    }, [settings.ssaoEnabled, settings.ssaoRadius, settings.ssaoIntensity, settings.ssaoBias, settings.antialiasMode]);
 
     // Exploded view
     useEffect(() => {
