@@ -1,7 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
   LoadedPart,
-  MaterialKey,
   ModelDimensions,
   ResolutionOption,
   SnapDirection,
@@ -23,7 +22,6 @@ import {
   Video,
   FileImage,
   Sparkles,
-  Layers,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -182,24 +180,34 @@ interface AccordionSectionProps {
   children: React.ReactNode;
   bordered?: boolean;
   isLight?: boolean;
+  // Optional extra control (e.g. "Hide All") rendered between the title and the chevron —
+  // a sibling of both toggle buttons, not nested inside either, so it never fights their clicks.
+  headerExtra?: React.ReactNode;
 }
 
 // Shared collapsible section used for Clipping Planes, Post-Processing, and Volume & Cost —
 // keeps their header style, spacing, and toggle behavior identical everywhere they appear.
-function AccordionSection({ title, isOpen, onToggle, children, bordered, isLight }: AccordionSectionProps) {
+function AccordionSection({ title, isOpen, onToggle, children, bordered, isLight, headerExtra }: AccordionSectionProps) {
   return (
     <div
       className={`flex flex-col gap-2 ${
         bordered ? `pt-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-700'}` : ''
       }`}
     >
-      <button
-        onClick={onToggle}
-        className="w-full flex items-center justify-between text-[11px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer"
-      >
-        <span>{title}</span>
-        {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-      </button>
+      <div className="w-full flex items-center justify-between gap-2">
+        <button
+          onClick={onToggle}
+          className="flex-1 text-left text-[11px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer"
+        >
+          {title}
+        </button>
+        <div className="flex items-center gap-2">
+          {headerExtra}
+          <button onClick={onToggle} className="text-slate-400 cursor-pointer flex items-center">
+            {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+      </div>
       {isOpen && <div className="flex flex-col gap-2.5 text-xs">{children}</div>}
     </div>
   );
@@ -240,7 +248,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onDeletePart,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const batchInputRef = useRef<HTMLInputElement>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isVolumeOpen, setIsVolumeOpen] = useState(false);
   const [isLoadedMeshesOpen, setIsLoadedMeshesOpen] = useState(false);
@@ -330,20 +337,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
     };
   };
 
+  // One file → single model, more than one → a multi-part assembly (each file keeps its own
+  // origin). Drag-and-drop onto the viewport already follows this same rule.
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      onUploadLocalFile(e.target.files[0]);
+      if (e.target.files.length > 1) {
+        onUploadBatchFiles(Array.from(e.target.files));
+      } else {
+        onUploadLocalFile(e.target.files[0]);
+      }
       e.target.value = '';
       if (isOpenOnMobile) onCloseMobile();
     }
   };
 
-  const handleBatchFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      onUploadBatchFiles(Array.from(e.target.files));
-      e.target.value = '';
-      if (isOpenOnMobile) onCloseMobile();
-    }
+  const handleHideAllParts = () => {
+    parts.forEach((part, i) => {
+      if (part.visible) onTogglePartVisibility(i);
+    });
   };
 
   const hasRotations = dimensions.rotX !== 0 || dimensions.rotY !== 0 || dimensions.rotZ !== 0;
@@ -380,7 +391,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v0.92
+                  v0.95
                 </span>
               </span>
             </div>
@@ -401,11 +412,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
 
-          {/* Upload Box: Local, Drive, or Demo */}
+          {/* Load CAD: Local, Drive, or Demo. Selecting (or dropping) more than one file loads
+              them as a multi-part assembly instead of needing a separate batch-load control. */}
           <div className="flex flex-col gap-2">
             <div
               id="upload-dropzone-button"
               onClick={() => fileInputRef.current?.click()}
+              title="Select multiple files to load them as a multi-part assembly"
               className={`border-2 border-dashed rounded-lg p-3 text-center cursor-pointer transition-colors ${
                 isLight
                   ? 'border-slate-300 bg-white hover:border-sky-500 text-slate-600'
@@ -415,7 +428,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="flex items-center justify-center gap-2 text-xs font-medium">
                 <Upload className="w-4 h-4 text-sky-500" />
                 <span>
-                  Upload <b>.GLB</b>, <b>.STL</b> or <b>.OBJ</b>
+                  Load CAD — <b>.GLB</b>, <b>.STL</b> or <b>.OBJ</b>
                 </span>
               </div>
               <input
@@ -423,6 +436,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 type="file"
                 id="fileInput"
                 accept=".glb,.stl,.obj,.gltf"
+                multiple
                 className="hidden"
                 onChange={handleFileChange}
               />
@@ -458,30 +472,57 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <span>Load Demo</span>
               </button>
             </div>
-
-            {/* Batch Load — multiple parts of one assembly, keeping each file's own origin */}
-            <button
-              id="btn-batch-upload"
-              onClick={() => batchInputRef.current?.click()}
-              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[11px] font-semibold border transition-all cursor-pointer ${
-                isLight
-                  ? 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-              }`}
-              title="Load multiple parts of one assembly, keeping each file's own origin"
-            >
-              <Layers className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Batch Load (Multi-Part Assembly)</span>
-              <input
-                ref={batchInputRef}
-                type="file"
-                multiple
-                accept=".glb,.stl,.obj,.gltf"
-                className="hidden"
-                onChange={handleBatchFileChange}
-              />
-            </button>
           </div>
+
+          {/* LOADED MESHES — only relevant once a model actually has multiple separable parts
+              (a batch-loaded assembly, or a GLB whose top-level nodes are separable meshes).
+              Sits right above the Viewer panel so it's visible as soon as an assembly loads. */}
+          {parts.length > 1 && (
+            <div
+              className={`p-3 rounded-lg border flex flex-col gap-2 ${
+                isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
+              }`}
+            >
+              <AccordionSection
+                title="Loaded Meshes"
+                isOpen={isLoadedMeshesOpen}
+                onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
+                isLight={isLight}
+                headerExtra={
+                  <button
+                    onClick={handleHideAllParts}
+                    title="Hide every loaded part"
+                    className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap"
+                  >
+                    Hide All
+                  </button>
+                }
+              >
+                {parts.map((part, i) => (
+                  <div key={`${part.name}-${i}`} className="flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 min-w-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={part.visible}
+                        onChange={() => onTogglePartVisibility(i)}
+                        className="accent-sky-500 w-4 h-4 cursor-pointer shrink-0"
+                      />
+                      <span className="truncate" title={part.name}>
+                        {part.name}
+                      </span>
+                    </label>
+                    <button
+                      onClick={() => onDeletePart(i)}
+                      title="Remove this part from the scene and free its memory"
+                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </AccordionSection>
+            </div>
+          )}
 
           {/* VIEWER PANEL */}
           <div
@@ -591,47 +632,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             </div>
           </div>
-
-          {/* LOADED MESHES — only relevant once a model actually has multiple separable parts
-              (a batch-loaded assembly, or a GLB whose top-level nodes are separable meshes).
-              Clipping Planes and Exploded View moved to floating icons over the viewport. */}
-          {parts.length > 1 && (
-            <div
-              className={`p-3 rounded-lg border flex flex-col gap-2 ${
-                isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
-              }`}
-            >
-              <AccordionSection
-                title="Loaded Meshes"
-                isOpen={isLoadedMeshesOpen}
-                onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
-                isLight={isLight}
-              >
-                {parts.map((part, i) => (
-                  <div key={`${part.name}-${i}`} className="flex items-center justify-between gap-2">
-                    <label className="flex items-center gap-2 min-w-0 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={part.visible}
-                        onChange={() => onTogglePartVisibility(i)}
-                        className="accent-sky-500 w-4 h-4 cursor-pointer shrink-0"
-                      />
-                      <span className="truncate" title={part.name}>
-                        {part.name}
-                      </span>
-                    </label>
-                    <button
-                      onClick={() => onDeletePart(i)}
-                      title="Remove this part from the scene and free its memory"
-                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </AccordionSection>
-            </div>
-          )}
 
           {/* EXPORT PANEL */}
           <div
@@ -777,231 +777,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
             {isSettingsOpen && (
               <div id="settingsContent" className="flex flex-col gap-2.5 pt-1.5">
-                {/* LookDev Material Selection */}
-                <select
-                  id="materialSelect"
-                  value={settings.material}
-                  onChange={(e) =>
-                    onUpdateSettings({ material: e.target.value as MaterialKey })
-                  }
-                  className={`w-full py-1.5 px-2 rounded-md border text-xs outline-hidden ${
-                    isLight
-                      ? 'bg-slate-100 border-slate-300 text-slate-800'
-                      : 'bg-[#1e293b] border-slate-600 text-white'
-                  }`}
-                >
-                  <option value="original">Mapped/Vertex Color</option>
-                  <option value="grey">Grey Clay (50% Roughness)</option>
-                  <option value="custom">Custom</option>
-                  <option value="normal">Normal Map High-Color</option>
-                  <option value="wireframe">Wireframe</option>
-                  <option value="sketch">Sketch / Cel-Shaded</option>
-                  <option value="matcapZebra">Matcap Zebra</option>
-                  <option value="thickness">Wall Thickness Checker</option>
-                </select>
-
-                {settings.material === 'wireframe' && (
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400">Wireframe Color</span>
-                    <input
-                      type="color"
-                      value={settings.wireframeColorHex}
-                      onChange={(e) => onUpdateSettings({ wireframeColorHex: e.target.value })}
-                      className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                    />
-                  </div>
-                )}
-
-                {/* Custom: stands in for what used to be separate Gold/Chrome/Red Clay/Pearl
-                    presets — pick a color and dial roughness/metalness to recreate any of them
-                    (glossy metal: low roughness + high metalness; matte clay: high roughness +
-                    zero metalness; chrome: near-zero roughness + full metalness). */}
-                {settings.material === 'custom' && (
-                  <div className="flex flex-col gap-1.5 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Color</span>
-                      <input
-                        type="color"
-                        value={settings.customColorHex}
-                        onChange={(e) => onUpdateSettings({ customColorHex: e.target.value })}
-                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                      />
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Roughness</span>
-                        <span className="font-mono text-sky-400">{settings.customRoughnessPercent}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={settings.customRoughnessPercent}
-                        onChange={(e) => onUpdateSettings({ customRoughnessPercent: Number(e.target.value) })}
-                        className="w-full accent-sky-500 cursor-pointer"
-                      />
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Metalness</span>
-                        <span className="font-mono text-sky-400">{settings.customMetalnessPercent}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={settings.customMetalnessPercent}
-                        onChange={(e) => onUpdateSettings({ customMetalnessPercent: Number(e.target.value) })}
-                        className="w-full accent-sky-500 cursor-pointer"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* Cel-shaded tri-tone: independent shadow / midtone / highlight colors instead
-                    of one flat hue shaded by brightness */}
-                {settings.material === 'sketch' && (
-                  <div className="flex flex-col gap-1.5 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Highlight Color</span>
-                      <input
-                        type="color"
-                        value={settings.sketchHighlightColorHex}
-                        onChange={(e) => onUpdateSettings({ sketchHighlightColorHex: e.target.value })}
-                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Midtone Color</span>
-                      <input
-                        type="color"
-                        value={settings.sketchColorHex}
-                        onChange={(e) => onUpdateSettings({ sketchColorHex: e.target.value })}
-                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Shadow Color</span>
-                      <input
-                        type="color"
-                        value={settings.sketchShadowColorHex}
-                        onChange={(e) => onUpdateSettings({ sketchShadowColorHex: e.target.value })}
-                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* Ghost / Transparency slider — applies on top of any LookDev material */}
-                <div className="flex flex-col gap-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span>Ghost / Opacity</span>
-                    <span className="font-mono text-sky-400">{settings.opacityPercent}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="10"
-                    max="100"
-                    value={settings.opacityPercent}
-                    onChange={(e) => onUpdateSettings({ opacityPercent: Number(e.target.value) })}
-                    className="w-full accent-sky-500 cursor-pointer"
-                  />
-                </div>
-
-                {/* Wall Thickness Threshold Control */}
-                {settings.material === 'thickness' && (
-                  <div
-                    id="thicknessControlPanel"
-                    className={`flex flex-col gap-2 p-2.5 rounded-md border text-xs ${
-                      isLight
-                        ? 'bg-red-50 border-red-200 text-slate-800'
-                        : 'bg-red-950/20 border-red-500/30 text-slate-200'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between font-medium">
-                      <span className="text-red-400 font-semibold">Highlight thickness under:</span>
-                      <div className="flex items-center gap-1">
-                        <DimensionInput
-                          id="minThicknessInput"
-                          value={settings.minThicknessInches}
-                          onCommit={(val) => onUpdateSettings({ minThicknessInches: val })}
-                          step="0.005"
-                          min={0.001}
-                          sensitivity={0.002}
-                          isLight={isLight}
-                        />
-                        <span className="text-slate-400">in.</span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-1 border-t border-slate-700/40">
-                      <span className="flex items-center gap-1.5 font-medium text-red-400">
-                        <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block"></span>
-                        &lt; {settings.minThicknessInches.toFixed(3)}&quot; (Thin Wall)
-                      </span>
-                      <span className="flex items-center gap-1.5 text-slate-400">
-                        <span className="w-2.5 h-2.5 rounded-full bg-slate-400 inline-block"></span>
-                        &ge; {settings.minThicknessInches.toFixed(3)}&quot; (Safe)
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Environment / Lighting preset */}
-                <div className="flex items-center justify-between text-xs">
-                  <span>Environment</span>
-                  <select
-                    value={settings.environmentPreset}
-                    onChange={(e) => onUpdateSettings({ environmentPreset: e.target.value as any })}
-                    className={`py-1 px-2 rounded-md border text-xs outline-hidden ${
-                      isLight
-                        ? 'bg-slate-100 border-slate-300 text-slate-800'
-                        : 'bg-[#1e293b] border-slate-600 text-white'
-                    }`}
-                  >
-                    <option value="studio">Studio</option>
-                    <option value="outdoor">Outdoor</option>
-                    <option value="interior">Interior</option>
-                    <option value="sunset">Sunset</option>
-                  </select>
-                </div>
-
-                {/* Orthographic View Toggle */}
-                <label className="flex items-center justify-between text-xs cursor-pointer">
-                  <span>Orthographic View (O)</span>
-                  <input
-                    type="checkbox"
-                    id="orthoToggle"
-                    checked={settings.isOrtho}
-                    onChange={(e) => onUpdateSettings({ isOrtho: e.target.checked })}
-                    className="accent-sky-500 w-4 h-4 cursor-pointer"
-                  />
-                </label>
-
-                {/* Focal Length Slider (Perspective only) */}
-                {!settings.isOrtho && (
-                  <div className="flex flex-col gap-1" id="focalContainer">
-                    <div className="flex items-center justify-between text-xs">
-                      <span>Focal Length</span>
-                      <span className="font-mono text-sky-400">{settings.focalLength}mm</span>
-                    </div>
-                    <input
-                      type="range"
-                      id="focalSlider"
-                      min="12"
-                      max="300"
-                      value={settings.focalLength}
-                      onChange={(e) => onUpdateSettings({ focalLength: Number(e.target.value) })}
-                      className="w-full accent-sky-500 cursor-pointer"
-                    />
-                  </div>
-                )}
-
-                <div className="text-xs text-slate-500 leading-tight -mt-1">
-                  * Grid, Clipping Planes, Exploded View, Background, Contrast, Post-Processing
-                  and Shadows all moved to floating icons over the viewport.
-                </div>
-
                 {/* Scale, Size & Rotation Panel (shown when model loaded) */}
                 {hasModel && (
                   <div
