@@ -54,7 +54,22 @@ import {
   ThemeMode,
   ViewerSettings,
 } from '../types';
-import { Loader2, UploadCloud, Upload, Cloud, Sparkles, LayoutGrid, X } from 'lucide-react';
+import {
+  Loader2,
+  UploadCloud,
+  Upload,
+  Cloud,
+  Sparkles,
+  LayoutGrid,
+  X,
+  Scissors,
+  Boxes,
+  Image as ImageIcon,
+  Contrast as ContrastIcon,
+  Wand2,
+  CloudSun,
+  Lightbulb,
+} from 'lucide-react';
 
 export interface ThreeViewportHandle {
   recenterView: () => void;
@@ -100,6 +115,7 @@ interface ThreeViewportProps {
   onOpenDriveModal?: () => void;
   onVolumeComputed?: (stats: VolumeStats | null) => void;
   onPartsChanged?: (parts: LoadedPart[]) => void;
+  isFullscreen?: boolean;
 }
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>(
@@ -116,6 +132,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       onOpenDriveModal,
       onVolumeComputed,
       onPartsChanged,
+      isFullscreen,
     },
     ref
   ) => {
@@ -125,8 +142,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const [isLoading, setIsLoading] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState('Loading Model...');
     const [isDragOver, setIsDragOver] = useState(false);
-    const [isGridPanelOpen, setIsGridPanelOpen] = useState(false);
+    // Which floating viewport panel (if any) is currently open — only one at a time, matching
+    // the rail's one-click-toggles-and-reveals pattern for Grid, Clipping Planes, Exploded View,
+    // Background, Contrast, Post-Processing, and Shadows.
+    const [openRailPanel, setOpenRailPanel] = useState<
+      'grid' | 'clip' | 'explode' | 'bg' | 'contrast' | 'post' | 'shadows' | null
+    >(null);
     const [loadedFileName, setLoadedFileName] = useState<string | null>(null);
+    const [partCount, setPartCount] = useState(0);
+    const isFullscreenRef = useRef(false);
     const [thicknessProgress, setThicknessProgress] = useState<number | null>(null);
     const thicknessCalculatingRef = useRef<boolean>(false);
 
@@ -682,7 +706,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const buildGridLineSegments = (
       halfExtent: number,
       spacing: number,
-      color: number,
+      color: THREE.ColorRepresentation,
       opacity: number
     ): THREE.LineSegments => {
       const positions: number[] = [];
@@ -749,13 +773,16 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       recalculateBounds();
       const halfExtent = Math.max(modelRadiusRef.current * 1.8, minorSpacing * 8);
 
+      const minorColor = settingsRef.current.gridMinorColorHex || '#334155';
+      const majorColor = settingsRef.current.gridMajorColorHex || '#38bdf8';
+
       const group = new THREE.Group();
-      group.add(buildGridLineSegments(halfExtent, minorSpacing, 0x334155, 0.55));
+      group.add(buildGridLineSegments(halfExtent, minorSpacing, minorColor, 0.55));
       if (majorSpacing > minorSpacing * 1.5) {
-        group.add(buildGridLineSegments(halfExtent, majorSpacing, 0x38bdf8, 0.85));
+        group.add(buildGridLineSegments(halfExtent, majorSpacing, majorColor, 0.85));
       }
 
-      // Center cross-hair, in blue, drawn brightest
+      // Center cross-hair, drawn brightest, tied to the major grid color
       const axisGeom = new THREE.BufferGeometry();
       axisGeom.setAttribute(
         'position',
@@ -764,7 +791,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           3
         )
       );
-      const axisMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: false });
+      const axisMat = new THREE.LineBasicMaterial({ color: majorColor, transparent: false });
       group.add(new THREE.LineSegments(axisGeom, axisMat));
 
       gridHelperRef.current = group;
@@ -1670,6 +1697,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       obj.userData.partName || obj.name || `Part ${index + 1}`;
 
     const notifyPartsChanged = () => {
+      setPartCount(batchPartsRef.current.length);
       onPartsChanged?.(
         batchPartsRef.current.map((part, i) => ({
           name: getPartName(part.object, i),
@@ -2350,7 +2378,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       viewHelperRef.current = viewHelper;
 
       const handlePointerDown = (event: PointerEvent) => {
-        if (viewHelperRef.current) {
+        if (viewHelperRef.current && !isFullscreenRef.current) {
           viewHelperRef.current.handleClick(event);
           requestRender();
         }
@@ -2508,7 +2536,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         if (needsRenderRef.current || cameraMoved) {
           if (activeCameraRef.current) {
             updateLights(activeCameraRef.current);
-            renderFrame(activeCameraRef.current, true);
+            renderFrame(activeCameraRef.current, !isFullscreenRef.current);
           }
           needsRenderRef.current = false;
         }
@@ -2630,7 +2658,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // Grid
     useEffect(() => {
       updateGrid();
-    }, [settings.showGrid, settings.gridSquareSizeInches, settings.gridMajorEveryInches]);
+    }, [
+      settings.showGrid,
+      settings.gridSquareSizeInches,
+      settings.gridMajorEveryInches,
+      settings.gridMinorColorHex,
+      settings.gridMajorColorHex,
+    ]);
+
+    // Fullscreen — hides the icon rail/panels (via the component's own conditional render) and
+    // the corner axis gizmo (by skipping ViewHelper rendering/hit-testing in the main loop).
+    useEffect(() => {
+      isFullscreenRef.current = !!isFullscreen;
+      if (!isFullscreen) setOpenRailPanel(null);
+      requestRender();
+    }, [isFullscreen]);
 
     // Environment preset (PMREM lookups are cached per-preset, so this is cheap after first use)
     useEffect(() => {
@@ -2700,6 +2742,26 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
     };
 
+    const railBtnClass = (isOn: boolean) =>
+      `p-2 rounded-lg border shadow-lg backdrop-blur-md cursor-pointer transition-colors ${
+        isOn
+          ? 'bg-sky-600 border-sky-400 text-white'
+          : 'bg-slate-900/90 border-slate-700/80 text-slate-300 hover:bg-slate-800'
+      }`;
+    const railPanelClass =
+      'w-56 p-3 rounded-xl bg-slate-900/95 border border-slate-700/80 shadow-2xl backdrop-blur-md text-xs text-slate-200 flex flex-col gap-2.5';
+    const railPanelHeader = (title: string) => (
+      <div className="flex items-center justify-between">
+        <span className="font-bold uppercase tracking-wider text-slate-400 text-[10px]">{title}</span>
+        <button onClick={() => setOpenRailPanel(null)} className="cursor-pointer text-slate-500 hover:text-slate-300">
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    );
+
+    const anyClipEnabled =
+      settings.clipping.x.enabled || settings.clipping.y.enabled || settings.clipping.z.enabled;
+
     return (
       <div
         ref={containerRef}
@@ -2712,70 +2774,480 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       >
         <canvas ref={canvasRef} id="canvas3d" className="absolute inset-0 w-full h-full block" />
 
-        {/* Grid Controls — relocated here from Settings so they're right next to what they affect.
-            One click does both: toggles the grid itself AND reveals its settings, instead of
-            opening a panel that still needed a separate checkbox to actually turn anything on. */}
-        {loadedFileName && (
+        {/* Floating viewport control rail. Every icon follows the same one-click pattern: click
+            toggles that control on/off AND opens/closes its settings panel; the panel's own X
+            only closes the panel, leaving the setting as-is. Grouped into Geometry (Grid,
+            Clipping Planes, Exploded View) and Look & Lighting (Background, Contrast,
+            Post-Processing, Shadows) with a spacer, not a label, between them. The whole rail
+            (and the corner axis gizmo, gated elsewhere via isFullscreenRef) hides in fullscreen. */}
+        {loadedFileName && !isFullscreen && (
           <div className="absolute top-4 right-4 z-10 flex flex-col items-end gap-2">
-            <button
-              onClick={() => {
-                const next = !settings.showGrid;
-                onUpdateSettings({ showGrid: next });
-                setIsGridPanelOpen(next);
-              }}
-              className={`p-2 rounded-lg border shadow-lg backdrop-blur-md cursor-pointer transition-colors ${
-                settings.showGrid
-                  ? 'bg-sky-600 border-sky-400 text-white'
-                  : 'bg-slate-900/90 border-slate-700/80 text-slate-300 hover:bg-slate-800'
-              }`}
-              title={settings.showGrid ? 'Grid: On (click to turn off) — G' : 'Grid: Off (click to turn on) — G'}
-            >
-              <LayoutGrid className="w-4 h-4" />
-            </button>
+            {/* Grid */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => {
+                  const next = !settings.showGrid;
+                  onUpdateSettings({ showGrid: next });
+                  setOpenRailPanel(next ? 'grid' : null);
+                }}
+                className={railBtnClass(settings.showGrid)}
+                title={settings.showGrid ? 'Grid: On (click to turn off) — G' : 'Grid: Off (click to turn on) — G'}
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
+              {openRailPanel === 'grid' && settings.showGrid && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Grid')}
+                  <div className="flex items-center justify-between">
+                    <span>Minor Size (in):</span>
+                    <input
+                      type="number"
+                      value={settings.gridSquareSizeInches}
+                      step="0.0625"
+                      min="0.001"
+                      onChange={(e) =>
+                        onUpdateSettings({ gridSquareSizeInches: parseFloat(e.target.value) || 0.125 })
+                      }
+                      className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Minor Color:</span>
+                    <input
+                      type="color"
+                      value={settings.gridMinorColorHex}
+                      onChange={(e) => onUpdateSettings({ gridMinorColorHex: e.target.value })}
+                      className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Major Every (in):</span>
+                    <input
+                      type="number"
+                      value={settings.gridMajorEveryInches}
+                      step="0.25"
+                      min="0.001"
+                      onChange={(e) =>
+                        onUpdateSettings({ gridMajorEveryInches: parseFloat(e.target.value) || 1 })
+                      }
+                      className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Major Color:</span>
+                    <input
+                      type="color"
+                      value={settings.gridMajorColorHex}
+                      onChange={(e) => onUpdateSettings({ gridMajorColorHex: e.target.value })}
+                      className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                    />
+                  </div>
+                  <div className="text-[10px] text-sky-400 leading-tight pt-1 border-t border-slate-700/60">
+                    Grid is a backdrop behind the model that always faces the camera, so it's
+                    visible from every view — true to scale in <b>Orthographic View</b>.
+                  </div>
+                </div>
+              )}
+            </div>
 
-            {isGridPanelOpen && settings.showGrid && (
-              <div className="w-56 p-3 rounded-xl bg-slate-900/95 border border-slate-700/80 shadow-2xl backdrop-blur-md text-xs text-slate-200 flex flex-col gap-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold uppercase tracking-wider text-slate-400 text-[10px]">
-                    Grid
-                  </span>
-                  <button onClick={() => setIsGridPanelOpen(false)} className="cursor-pointer text-slate-500 hover:text-slate-300">
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+            {/* Clipping Planes */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => {
+                  if (anyClipEnabled) {
+                    onUpdateSettings({
+                      clipping: {
+                        x: { ...settings.clipping.x, enabled: false },
+                        y: { ...settings.clipping.y, enabled: false },
+                        z: { ...settings.clipping.z, enabled: false },
+                      },
+                    });
+                    setOpenRailPanel(null);
+                  } else {
+                    onUpdateSettings({
+                      clipping: { ...settings.clipping, x: { ...settings.clipping.x, enabled: true } },
+                    });
+                    setOpenRailPanel('clip');
+                  }
+                }}
+                className={railBtnClass(anyClipEnabled)}
+                title={anyClipEnabled ? 'Clipping Planes: On (click to turn off)' : 'Clipping Planes: Off (click to turn on)'}
+              >
+                <Scissors className="w-4 h-4" />
+              </button>
+              {openRailPanel === 'clip' && anyClipEnabled && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Clipping Planes')}
+                  {(['x', 'y', 'z'] as const).map((axis) => {
+                    const label = axis === 'x' ? 'Left / Right' : axis === 'y' ? 'Top / Bottom' : 'Front / Back';
+                    const c = settings.clipping[axis];
+                    return (
+                      <div key={axis} className="flex flex-col gap-1">
+                        <label className="flex items-center justify-between cursor-pointer">
+                          <span>{label}</span>
+                          <input
+                            type="checkbox"
+                            checked={c.enabled}
+                            onChange={(e) =>
+                              onUpdateSettings({
+                                clipping: { ...settings.clipping, [axis]: { ...c, enabled: e.target.checked } },
+                              })
+                            }
+                            className="accent-sky-500 w-4 h-4 cursor-pointer"
+                          />
+                        </label>
+                        {c.enabled && (
+                          <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-600">
+                            <input
+                              type="range"
+                              min="-10"
+                              max="10"
+                              step="0.05"
+                              value={c.offsetInches}
+                              onChange={(e) =>
+                                onUpdateSettings({
+                                  clipping: {
+                                    ...settings.clipping,
+                                    [axis]: { ...c, offsetInches: Number(e.target.value) },
+                                  },
+                                })
+                              }
+                              className="flex-1 accent-sky-500 cursor-pointer"
+                            />
+                            <button
+                              onClick={() =>
+                                onUpdateSettings({
+                                  clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
+                                })
+                              }
+                              className={`text-xs font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
+                                c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
+                              }`}
+                              title="Flip which side is cut away"
+                            >
+                              Flip
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
+              )}
+            </div>
 
-                <div className="flex items-center justify-between">
-                  <span>Minor Size (in):</span>
-                  <input
-                    type="number"
-                    value={settings.gridSquareSizeInches}
-                    step="0.0625"
-                    min="0.001"
-                    onChange={(e) =>
-                      onUpdateSettings({ gridSquareSizeInches: parseFloat(e.target.value) || 0.125 })
+            {/* Exploded View — only relevant once the model actually has separable parts */}
+            {partCount > 1 && (
+              <div className="flex flex-col items-end gap-2">
+                <button
+                  onClick={() => {
+                    if (settings.explodeAmount > 0) {
+                      onUpdateSettings({ explodeAmount: 0 });
+                      setOpenRailPanel(null);
+                    } else {
+                      onUpdateSettings({ explodeAmount: 0.3 });
+                      setOpenRailPanel('explode');
                     }
-                    className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
-                  />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Major (blue) Every (in):</span>
-                  <input
-                    type="number"
-                    value={settings.gridMajorEveryInches}
-                    step="0.25"
-                    min="0.001"
-                    onChange={(e) =>
-                      onUpdateSettings({ gridMajorEveryInches: parseFloat(e.target.value) || 1 })
-                    }
-                    className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
-                  />
-                </div>
-                <div className="text-[10px] text-sky-400 leading-tight pt-1 border-t border-slate-700/60">
-                  Grid is a backdrop behind the model that always faces the camera, so it's
-                  visible from every view — true to scale in <b>Orthographic View</b>.
-                </div>
+                  }}
+                  className={railBtnClass(settings.explodeAmount > 0)}
+                  title={settings.explodeAmount > 0 ? 'Exploded View: On (click to reset)' : 'Exploded View: Off (click to explode)'}
+                >
+                  <Boxes className="w-4 h-4" />
+                </button>
+                {openRailPanel === 'explode' && settings.explodeAmount > 0 && (
+                  <div className={railPanelClass}>
+                    {railPanelHeader('Exploded View')}
+                    <div className="flex items-center justify-between">
+                      <span>{partCount} parts</span>
+                      <span className="font-mono text-sky-400">
+                        {Math.round(settings.explodeAmount * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={Math.round(settings.explodeAmount * 100)}
+                      onChange={(e) => onUpdateSettings({ explodeAmount: Number(e.target.value) / 100 })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                )}
               </div>
             )}
+
+            {/* Spacer between the Geometry and Look & Lighting clusters — spacing, not a label */}
+            <div className="h-2" />
+
+            {/* Background + Vignette */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => {
+                  const next = !settings.vignetteEnabled;
+                  onUpdateSettings({ vignetteEnabled: next });
+                  setOpenRailPanel(next ? 'bg' : null);
+                }}
+                className={railBtnClass(settings.vignetteEnabled)}
+                title={settings.vignetteEnabled ? 'Vignette: On (click to turn off)' : 'Vignette: Off (click to turn on)'}
+              >
+                <ImageIcon className="w-4 h-4" />
+              </button>
+              {openRailPanel === 'bg' && settings.vignetteEnabled && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Background')}
+                  <div className="flex items-center justify-between">
+                    <span>Background Color</span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="color"
+                        value={settings.backgroundColorHex}
+                        onChange={(e) => onUpdateSettings({ backgroundColorHex: e.target.value })}
+                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                      />
+                      <input
+                        type="text"
+                        value={settings.backgroundColorHex.toUpperCase()}
+                        onChange={(e) => {
+                          let hex = e.target.value.trim();
+                          if (!hex.startsWith('#')) hex = '#' + hex;
+                          if (/^#[0-9A-F]{6}$/i.test(hex)) onUpdateSettings({ backgroundColorHex: hex });
+                        }}
+                        className="w-20 text-center py-1 px-1 font-mono text-xs font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-700/60">
+                    <span className="text-slate-400">Vignette Color</span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="color"
+                        value={settings.vignetteColorHex}
+                        onChange={(e) => onUpdateSettings({ vignetteColorHex: e.target.value })}
+                        className="w-5 h-5 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                      />
+                      <input
+                        type="text"
+                        value={settings.vignetteColorHex.toUpperCase()}
+                        onChange={(e) => {
+                          let hex = e.target.value.trim();
+                          if (!hex.startsWith('#')) hex = '#' + hex;
+                          if (/^#[0-9A-F]{6}$/i.test(hex)) onUpdateSettings({ vignetteColorHex: hex });
+                        }}
+                        className="w-16 text-center py-0.5 px-1 font-mono rounded border bg-[#1e293b] border-slate-600 text-sky-400"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>Intensity</span>
+                      <span className="font-mono text-sky-400">{settings.vignetteIntensityPercent}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={settings.vignetteIntensityPercent}
+                      onChange={(e) =>
+                        onUpdateSettings({ vignetteIntensityPercent: Number(e.target.value) })
+                      }
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Contrast — always "active" (100% = neutral), so a click just snaps between 100%
+                and 250%; the slider inside dials in anything else. */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => {
+                  if (settings.contrastPercent !== 100) {
+                    onUpdateSettings({ contrastPercent: 100 });
+                    setOpenRailPanel(null);
+                  } else {
+                    onUpdateSettings({ contrastPercent: 250 });
+                    setOpenRailPanel('contrast');
+                  }
+                }}
+                className={railBtnClass(settings.contrastPercent !== 100)}
+                title={
+                  settings.contrastPercent !== 100
+                    ? 'Contrast: boosted (click to reset to 100%)'
+                    : 'Contrast: 100% (click to boost to 250%)'
+                }
+              >
+                <ContrastIcon className="w-4 h-4" />
+              </button>
+              {openRailPanel === 'contrast' && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Contrast')}
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between">
+                      <span>Contrast</span>
+                      <span className="font-mono text-sky-400">{settings.contrastPercent}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="50"
+                      max="300"
+                      value={settings.contrastPercent}
+                      onChange={(e) => onUpdateSettings({ contrastPercent: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Post-Processing: SSAO + Anti-aliasing */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => {
+                  const next = !settings.ssaoEnabled;
+                  onUpdateSettings({ ssaoEnabled: next });
+                  setOpenRailPanel(next ? 'post' : null);
+                }}
+                className={railBtnClass(settings.ssaoEnabled)}
+                title={settings.ssaoEnabled ? 'Post-Processing: On (click to turn off)' : 'Post-Processing: Off (click to turn on)'}
+              >
+                <Wand2 className="w-4 h-4" />
+              </button>
+              {openRailPanel === 'post' && settings.ssaoEnabled && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Post-Processing')}
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>AO Radius</span>
+                      <span className="font-mono text-sky-400">{settings.ssaoRadius}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="100"
+                      value={settings.ssaoRadius}
+                      onChange={(e) => onUpdateSettings({ ssaoRadius: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>AO Intensity</span>
+                      <span className="font-mono text-sky-400">{settings.ssaoIntensity}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="200"
+                      value={settings.ssaoIntensity}
+                      onChange={(e) => onUpdateSettings({ ssaoIntensity: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>AO Bias</span>
+                      <span className="font-mono text-sky-400">{settings.ssaoBias}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={settings.ssaoBias}
+                      onChange={(e) => onUpdateSettings({ ssaoBias: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-700/60">
+                    <span>Anti-aliasing</span>
+                    <select
+                      value={settings.antialiasMode}
+                      onChange={(e) => onUpdateSettings({ antialiasMode: e.target.value as any })}
+                      className="py-1 px-2 rounded-md border text-xs outline-hidden bg-[#1e293b] border-slate-600 text-white"
+                    >
+                      <option value="none">Off</option>
+                      <option value="fxaa">FXAA (fast)</option>
+                      <option value="smaa">SMAA (higher quality)</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Shadows — Lock Lights lives here now, as a toggle under the sliders, instead of
+                being its own icon */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => {
+                  const next = !settings.castShadows;
+                  onUpdateSettings({ castShadows: next });
+                  setOpenRailPanel(next ? 'shadows' : null);
+                }}
+                className={railBtnClass(settings.castShadows)}
+                title={settings.castShadows ? 'Shadows: On (click to turn off)' : 'Shadows: Off (click to turn on)'}
+              >
+                <CloudSun className="w-4 h-4" />
+              </button>
+              {openRailPanel === 'shadows' && settings.castShadows && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Shadows')}
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>Softness</span>
+                      <span className="font-mono text-sky-400">{settings.shadowSoftness}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={settings.shadowSoftness}
+                      onChange={(e) => onUpdateSettings({ shadowSoftness: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>Darkness</span>
+                      <span className="font-mono text-sky-400">{settings.shadowDarkness}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={settings.shadowDarkness}
+                      onChange={(e) => onUpdateSettings({ shadowDarkness: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Map Resolution</span>
+                    <select
+                      value={settings.shadowMapResolution}
+                      onChange={(e) =>
+                        onUpdateSettings({ shadowMapResolution: Number(e.target.value) as 1024 | 2048 | 4096 })
+                      }
+                      className="py-1 px-1.5 rounded-md border text-xs outline-hidden bg-[#1e293b] border-slate-600 text-white"
+                    >
+                      <option value={1024}>1024</option>
+                      <option value={2048}>2048</option>
+                      <option value={4096}>4096</option>
+                    </select>
+                  </div>
+                  <label className="flex items-center justify-between cursor-pointer pt-1 border-t border-slate-700/60">
+                    <span className="flex items-center gap-1.5">
+                      <Lightbulb className="w-3.5 h-3.5 text-sky-400" />
+                      Lock Lights to Camera
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={settings.lockLightsToCamera}
+                      onChange={(e) => onUpdateSettings({ lockLightsToCamera: e.target.checked })}
+                      className="accent-sky-500 w-4 h-4 cursor-pointer"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
           </div>
         )}
 

@@ -242,8 +242,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const batchInputRef = useRef<HTMLInputElement>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isClippingOpen, setIsClippingOpen] = useState(false);
-  const [isPostProcessingOpen, setIsPostProcessingOpen] = useState(false);
   const [isVolumeOpen, setIsVolumeOpen] = useState(false);
   const [isLoadedMeshesOpen, setIsLoadedMeshesOpen] = useState(false);
   const [showExportDriveMenu, setShowExportDriveMenu] = useState(false);
@@ -382,7 +380,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v0.91
+                  v0.92
                 </span>
               </span>
             </div>
@@ -594,114 +592,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
 
-          {/* CLIPPING PLANES PANEL — its own top-level accordion, right below the viewer controls */}
-          <div
-            className={`p-3 rounded-lg border flex flex-col gap-2 ${
-              isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
-            }`}
-          >
-            <button
-              onClick={() => setIsClippingOpen(!isClippingOpen)}
-              className="w-full flex items-center justify-between text-xs font-bold text-sky-500 uppercase cursor-pointer"
-            >
-              <span>Clipping Planes</span>
-              {isClippingOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
-
-            {isClippingOpen && (
-              <div className="flex flex-col gap-2.5 pt-1.5 text-xs">
-                {(['x', 'y', 'z'] as const).map((axis) => {
-                  const label = axis === 'x' ? 'Left / Right' : axis === 'y' ? 'Top / Bottom' : 'Front / Back';
-                  const c = settings.clipping[axis];
-                  return (
-                    <div key={axis} className="flex flex-col gap-1">
-                      <label className="flex items-center justify-between cursor-pointer">
-                        <span>{label}</span>
-                        <input
-                          type="checkbox"
-                          checked={c.enabled}
-                          onChange={(e) =>
-                            onUpdateSettings({
-                              clipping: { ...settings.clipping, [axis]: { ...c, enabled: e.target.checked } },
-                            })
-                          }
-                          className="accent-sky-500 w-4 h-4 cursor-pointer"
-                        />
-                      </label>
-                      {c.enabled && (
-                        <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-600">
-                          <input
-                            type="range"
-                            min="-10"
-                            max="10"
-                            step="0.05"
-                            value={c.offsetInches}
-                            onChange={(e) =>
-                              onUpdateSettings({
-                                clipping: {
-                                  ...settings.clipping,
-                                  [axis]: { ...c, offsetInches: Number(e.target.value) },
-                                },
-                              })
-                            }
-                            className="flex-1 accent-sky-500 cursor-pointer"
-                          />
-                          <button
-                            onClick={() =>
-                              onUpdateSettings({
-                                clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
-                              })
-                            }
-                            className={`text-xs font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
-                              c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
-                            }`}
-                            title="Flip which side is cut away"
-                          >
-                            Flip
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* EXPLODED VIEW + LOADED MESHES — only relevant once a model actually has multiple
-              separable parts (a batch-loaded assembly, or a GLB whose top-level nodes are
-              separable meshes) */}
+          {/* LOADED MESHES — only relevant once a model actually has multiple separable parts
+              (a batch-loaded assembly, or a GLB whose top-level nodes are separable meshes).
+              Clipping Planes and Exploded View moved to floating icons over the viewport. */}
           {parts.length > 1 && (
             <div
-              className={`p-3 rounded-lg border flex flex-col gap-2.5 ${
+              className={`p-3 rounded-lg border flex flex-col gap-2 ${
                 isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
               }`}
             >
-              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                Exploded View
-              </div>
-              <div className="flex flex-col gap-1 text-xs">
-                <div className="flex items-center justify-between">
-                  <span>{parts.length} parts</span>
-                  <span className="font-mono text-sky-400">
-                    {Math.round(settings.explodeAmount * 100)}%
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={Math.round(settings.explodeAmount * 100)}
-                  onChange={(e) => onUpdateSettings({ explodeAmount: Number(e.target.value) / 100 })}
-                  className="w-full accent-sky-500 cursor-pointer"
-                />
-              </div>
-
               <AccordionSection
                 title="Loaded Meshes"
                 isOpen={isLoadedMeshesOpen}
                 onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
-                bordered
                 isLight={isLight}
               >
                 {parts.map((part, i) => (
@@ -1095,287 +998,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 )}
 
                 <div className="text-xs text-slate-500 leading-tight -mt-1">
-                  * Grid options moved to the view area — see the grid icon top-right of the viewport.
-                  Clipping Planes moved below the Viewer panel.
+                  * Grid, Clipping Planes, Exploded View, Background, Contrast, Post-Processing
+                  and Shadows all moved to floating icons over the viewport.
                 </div>
-
-                <label className="flex items-center justify-between text-xs cursor-pointer">
-                  <span>Cast Shadows (C)</span>
-                  <input
-                    type="checkbox"
-                    id="shadowToggle"
-                    checked={settings.castShadows}
-                    onChange={(e) => onUpdateSettings({ castShadows: e.target.checked })}
-                    className="accent-sky-500 w-4 h-4 cursor-pointer"
-                  />
-                </label>
-
-                {settings.castShadows && (
-                  <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600 text-xs">
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Softness</span>
-                        <span className="font-mono text-sky-400">{settings.shadowSoftness}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={settings.shadowSoftness}
-                        onChange={(e) => onUpdateSettings({ shadowSoftness: Number(e.target.value) })}
-                        className="w-full accent-sky-500 cursor-pointer"
-                      />
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Darkness</span>
-                        <span className="font-mono text-sky-400">{settings.shadowDarkness}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={settings.shadowDarkness}
-                        onChange={(e) => onUpdateSettings({ shadowDarkness: Number(e.target.value) })}
-                        className="w-full accent-sky-500 cursor-pointer"
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Shadow Map Resolution</span>
-                      <select
-                        value={settings.shadowMapResolution}
-                        onChange={(e) =>
-                          onUpdateSettings({ shadowMapResolution: Number(e.target.value) as 1024 | 2048 | 4096 })
-                        }
-                        className={`py-1 px-1.5 rounded-md border text-xs outline-hidden ${
-                          isLight
-                            ? 'bg-slate-100 border-slate-300 text-slate-800'
-                            : 'bg-[#1e293b] border-slate-600 text-white'
-                        }`}
-                      >
-                        <option value={1024}>1024</option>
-                        <option value={2048}>2048</option>
-                        <option value={4096}>4096</option>
-                      </select>
-                    </div>
-                  </div>
-                )}
-
-                {/* Lock Lights Toggle */}
-                <label className="flex items-center justify-between text-xs cursor-pointer">
-                  <span>Lock Lights to Camera (L)</span>
-                  <input
-                    type="checkbox"
-                    id="lockLightsToggle"
-                    checked={settings.lockLightsToCamera}
-                    onChange={(e) => onUpdateSettings({ lockLightsToCamera: e.target.checked })}
-                    className="accent-sky-500 w-4 h-4 cursor-pointer"
-                  />
-                </label>
-
-                {/* Contrast Slider */}
-                <div className="flex flex-col gap-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span>Contrast</span>
-                    <span className="font-mono text-sky-400">{settings.contrastPercent}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    id="contrastSlider"
-                    min="50"
-                    max="250"
-                    value={settings.contrastPercent}
-                    onChange={(e) => onUpdateSettings({ contrastPercent: Number(e.target.value) })}
-                    className="w-full accent-sky-500 cursor-pointer"
-                  />
-                </div>
-
-                {/* Background Color Picker */}
-                <div className="flex items-center justify-between text-xs">
-                  <span>Background Color</span>
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="color"
-                      id="nativeColorPicker"
-                      value={settings.backgroundColorHex}
-                      onChange={(e) => onUpdateSettings({ backgroundColorHex: e.target.value })}
-                      className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                    />
-                    <input
-                      type="text"
-                      id="pickerHexInput"
-                      value={settings.backgroundColorHex.toUpperCase()}
-                      onChange={(e) => {
-                        let hex = e.target.value.trim();
-                        if (!hex.startsWith('#')) hex = '#' + hex;
-                        if (/^#[0-9A-F]{6}$/i.test(hex)) {
-                          onUpdateSettings({ backgroundColorHex: hex });
-                        }
-                      }}
-                      className={`w-20 text-center py-1 px-1 font-mono text-xs font-bold rounded-md border text-sky-400 ${
-                        isLight
-                          ? 'bg-slate-100 border-slate-300 text-slate-900'
-                          : 'bg-[#1e293b] border-slate-600'
-                      }`}
-                    />
-                  </div>
-                </div>
-
-                {/* Background Color + Vignette sit together as one background-styling section
-                    (no divider between them — the rule after Vignette is intentionally kept) */}
-                <div className="flex flex-col gap-2">
-                  <label className="flex items-center justify-between text-xs cursor-pointer">
-                    <span>Vignette Effect</span>
-                    <input
-                      type="checkbox"
-                      id="vignetteToggle"
-                      checked={settings.vignetteEnabled}
-                      onChange={(e) => onUpdateSettings({ vignetteEnabled: e.target.checked })}
-                      className="accent-sky-500 w-4 h-4 cursor-pointer"
-                    />
-                  </label>
-
-                  {settings.vignetteEnabled && (
-                    <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Vignette Color</span>
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="color"
-                            id="vignetteColor"
-                            value={settings.vignetteColorHex}
-                            onChange={(e) =>
-                              onUpdateSettings({ vignetteColorHex: e.target.value })
-                            }
-                            className="w-5 h-5 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
-                          />
-                          <input
-                            type="text"
-                            id="vignetteHex"
-                            value={settings.vignetteColorHex.toUpperCase()}
-                            onChange={(e) => {
-                              let hex = e.target.value.trim();
-                              if (!hex.startsWith('#')) hex = '#' + hex;
-                              if (/^#[0-9A-F]{6}$/i.test(hex)) {
-                                onUpdateSettings({ vignetteColorHex: hex });
-                              }
-                            }}
-                            className={`w-16 text-center py-0.5 px-1 font-mono rounded border text-sky-400 ${
-                              isLight
-                                ? 'bg-slate-100 border-slate-300 text-slate-900'
-                                : 'bg-[#1e293b] border-slate-600'
-                            }`}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center justify-between text-slate-400">
-                          <span>Intensity</span>
-                          <span className="font-mono text-sky-400">
-                            {settings.vignetteIntensityPercent}%
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          id="vignetteIntensity"
-                          min="0"
-                          max="100"
-                          value={settings.vignetteIntensityPercent}
-                          onChange={(e) =>
-                            onUpdateSettings({
-                              vignetteIntensityPercent: Number(e.target.value),
-                            })
-                          }
-                          className="w-full accent-sky-500 cursor-pointer"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Post-Processing: SSAO + Anti-aliasing — moved to right after Vignette,
-                    collapsed by default like the other heavier sub-sections */}
-                <AccordionSection
-                  title="Post-Processing"
-                  isOpen={isPostProcessingOpen}
-                  onToggle={() => setIsPostProcessingOpen(!isPostProcessingOpen)}
-                  bordered
-                  isLight={isLight}
-                >
-                  <label className="flex items-center justify-between cursor-pointer">
-                    <span>Ambient Occlusion</span>
-                    <input
-                      type="checkbox"
-                      checked={settings.ssaoEnabled}
-                      onChange={(e) => onUpdateSettings({ ssaoEnabled: e.target.checked })}
-                      className="accent-sky-500 w-4 h-4 cursor-pointer"
-                    />
-                  </label>
-                  {settings.ssaoEnabled && (
-                    <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600">
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center justify-between text-slate-400">
-                          <span>Radius</span>
-                          <span className="font-mono text-sky-400">{settings.ssaoRadius}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="1"
-                          max="100"
-                          value={settings.ssaoRadius}
-                          onChange={(e) => onUpdateSettings({ ssaoRadius: Number(e.target.value) })}
-                          className="w-full accent-sky-500 cursor-pointer"
-                        />
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center justify-between text-slate-400">
-                          <span>Intensity</span>
-                          <span className="font-mono text-sky-400">{settings.ssaoIntensity}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="200"
-                          value={settings.ssaoIntensity}
-                          onChange={(e) => onUpdateSettings({ ssaoIntensity: Number(e.target.value) })}
-                          className="w-full accent-sky-500 cursor-pointer"
-                        />
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center justify-between text-slate-400">
-                          <span>Bias</span>
-                          <span className="font-mono text-sky-400">{settings.ssaoBias}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={settings.ssaoBias}
-                          onChange={(e) => onUpdateSettings({ ssaoBias: Number(e.target.value) })}
-                          className="w-full accent-sky-500 cursor-pointer"
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between">
-                    <span>Anti-aliasing</span>
-                    <select
-                      value={settings.antialiasMode}
-                      onChange={(e) => onUpdateSettings({ antialiasMode: e.target.value as any })}
-                      className={`py-1 px-2 rounded-md border text-xs outline-hidden ${
-                        isLight
-                          ? 'bg-slate-100 border-slate-300 text-slate-800'
-                          : 'bg-[#1e293b] border-slate-600 text-white'
-                      }`}
-                    >
-                      <option value="none">Off</option>
-                      <option value="fxaa">FXAA (fast)</option>
-                      <option value="smaa">SMAA (higher quality)</option>
-                    </select>
-                  </div>
-                </AccordionSection>
 
                 {/* Scale, Size & Rotation Panel (shown when model loaded) */}
                 {hasModel && (

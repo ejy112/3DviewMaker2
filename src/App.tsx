@@ -34,6 +34,8 @@ export default function App() {
     showGrid: false,
     gridSquareSizeInches: 0.125,
     gridMajorEveryInches: 1,
+    gridMinorColorHex: '#334155',
+    gridMajorColorHex: '#38bdf8',
 
     castShadows: false,
     shadowSoftness: 40,
@@ -411,6 +413,7 @@ export default function App() {
           onOpenDriveModal={() => handleOpenDriveModal('import')}
           onVolumeComputed={setVolumeStats}
           onPartsChanged={setParts}
+          isFullscreen={isFullscreen}
         />
       </main>
 
