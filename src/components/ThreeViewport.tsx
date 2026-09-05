@@ -646,6 +646,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       if (aoPassRef.current && aoPassRef.current.camera !== cam) {
         aoPassRef.current.camera = cam;
       }
+      updateGridOrientation(cam);
       composer.render();
 
       if (withViewHelper) {
@@ -676,7 +677,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       cameraOrthoRef.current.updateProjectionMatrix();
     };
 
-    // Build one square of grid line segments in the XZ plane (y=0 locally)
+    // Build one square of grid line segments in the local XY plane (z=0 locally) — this is a
+    // flat card meant to be billboarded to face the camera, not a ground plane.
     const buildGridLineSegments = (
       halfExtent: number,
       spacing: number,
@@ -686,10 +688,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const positions: number[] = [];
       const start = -Math.ceil(halfExtent / spacing) * spacing;
       for (let x = start; x <= halfExtent + 1e-6; x += spacing) {
-        positions.push(x, 0, -halfExtent, x, 0, halfExtent);
+        positions.push(x, -halfExtent, 0, x, halfExtent, 0);
       }
-      for (let z = start; z <= halfExtent + 1e-6; z += spacing) {
-        positions.push(-halfExtent, 0, z, halfExtent, 0, z);
+      for (let y = start; y <= halfExtent + 1e-6; y += spacing) {
+        positions.push(-halfExtent, y, 0, halfExtent, y, 0);
       }
       const geom = new THREE.BufferGeometry();
       geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -714,9 +716,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       });
     };
 
-    // World/model-aligned ground grid — bottom of the mesh, centered L/R and F/B. Unlike the
-    // old camera-facing "card" grid, this never needs to be rebuilt when the camera orbits or
-    // during a turntable spin, which is what caused the old grid-jump bug.
+    // Background backdrop grid — a flat card, billboarded every frame (see updateGridOrientation)
+    // to always face whichever camera is currently rendering, positioned behind the model. This
+    // replaced an earlier world/model-aligned ground-plane grid, which was seen edge-on (and so
+    // effectively invisible) from front/back/left/right views — exactly the views a backdrop
+    // scale reference matters most for. Billboarding here is cheap (just a position/quaternion
+    // copy, no geometry rebuild) so it's safe to do every frame, including during orbiting or a
+    // turntable spin, unlike an older camera-facing grid that rebuilt its geometry per frame and
+    // visibly popped.
     const updateGrid = () => {
       if (!sceneRef.current) return;
       if (gridHelperRef.current) {
@@ -737,13 +744,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const minorSpacing = Math.max(minorInches * unitsPerInch, 0.001);
       const majorSpacing = Math.max(majorInches * unitsPerInch, minorSpacing);
 
-      const box = new THREE.Box3().setFromObject(currentModelRef.current);
-      const size = new THREE.Vector3();
-      box.getSize(size);
-      const center = new THREE.Vector3();
-      box.getCenter(center);
-
-      const halfExtent = Math.max(size.x, size.z, minorSpacing * 8) * 1.6;
+      // Sized from the model's bounding radius (not a single axis) since the card can face any
+      // direction depending on the current camera angle.
+      recalculateBounds();
+      const halfExtent = Math.max(modelRadiusRef.current * 1.8, minorSpacing * 8);
 
       const group = new THREE.Group();
       group.add(buildGridLineSegments(halfExtent, minorSpacing, 0x334155, 0.55));
@@ -751,25 +755,39 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         group.add(buildGridLineSegments(halfExtent, majorSpacing, 0x38bdf8, 0.85));
       }
 
-      // Primary X/Z axis lines through the model's center, in blue, drawn brightest
+      // Center cross-hair, in blue, drawn brightest
       const axisGeom = new THREE.BufferGeometry();
       axisGeom.setAttribute(
         'position',
         new THREE.Float32BufferAttribute(
-          [-halfExtent, 0, 0, halfExtent, 0, 0, 0, 0, -halfExtent, 0, 0, halfExtent],
+          [-halfExtent, 0, 0, halfExtent, 0, 0, 0, -halfExtent, 0, 0, halfExtent, 0],
           3
         )
       );
       const axisMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: false });
       group.add(new THREE.LineSegments(axisGeom, axisMat));
 
-      // Align to the bottom of the mesh, centered on X (L/R) and Z (F/B)
-      const liftOffset = Math.max(size.length() * 0.002, 0.01);
-      group.position.set(center.x, box.min.y - liftOffset, center.z);
-
       gridHelperRef.current = group;
       sceneRef.current.add(group);
+      updateGridOrientation(activeCameraRef.current);
       requestRender();
+    };
+
+    // Faces the grid card toward `cam` and tucks it behind the model (relative to that camera).
+    // Uses world origin as the model's center rather than controls.target, so this works
+    // equally well for the live OrbitControls camera and the standalone cameras used for
+    // turnaround-image and turntable-video export, which don't share those controls.
+    // Cheap enough to call every render — no geometry touched.
+    const updateGridOrientation = (cam: THREE.Camera | null) => {
+      const group = gridHelperRef.current;
+      if (!group || !cam) return;
+      const dirToTarget = cam.position.clone().negate();
+      if (dirToTarget.lengthSq() < 1e-10) return;
+      dirToTarget.normalize();
+
+      const rad = modelRadiusRef.current || 1;
+      group.position.copy(dirToTarget).multiplyScalar(rad * 1.5);
+      group.quaternion.copy(cam.quaternion);
     };
 
     // Cheap, high-frequency-safe: mutates the three clip planes in place from current settings
@@ -2028,11 +2046,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
         updateLights(exportCam);
 
-        // Grid is now a static world/model-aligned ground plane, so it just needs to be
-        // shown or hidden per the toggle — no per-view repositioning required anymore.
         if (includeGrid) {
           if (!gridHelperRef.current) updateGrid();
           if (gridHelperRef.current) gridHelperRef.current.visible = true;
+          updateGridOrientation(exportCam);
         } else if (gridHelperRef.current) {
           gridHelperRef.current.visible = false;
         }
@@ -2482,8 +2499,9 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           cam.position.z = x * Math.sin(speed) + z * Math.cos(speed);
           cam.lookAt(controlsRef.current.target);
 
-          // Grid is world/model-aligned (not camera-facing), so it does not need to be
-          // rebuilt every turntable frame — this is also what fixes the old spin glitch.
+          // The grid backdrop re-orients every render (see renderFrame/updateGridOrientation)
+          // by just copying position/quaternion — no geometry rebuild — so billboarding it
+          // through a turntable spin stays smooth instead of popping.
           needsRenderRef.current = true;
         }
 
@@ -2759,8 +2777,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                       />
                     </div>
                     <div className="text-[10px] text-sky-400 leading-tight pt-1 border-t border-slate-700/60">
-                      Grid sits at the bottom of the mesh, centered — true to scale in{' '}
-                      <b>Orthographic View</b>.
+                      Grid is a backdrop behind the model that always faces the camera, so it's
+                      visible from every view — true to scale in <b>Orthographic View</b>.
                     </div>
                   </>
                 )}
