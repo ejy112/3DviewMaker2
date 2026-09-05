@@ -69,6 +69,9 @@ import {
   Wand2,
   CloudSun,
   Lightbulb,
+  Globe,
+  Box,
+  Square,
 } from 'lucide-react';
 
 export interface ThreeViewportHandle {
@@ -146,7 +149,17 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // the rail's one-click-toggles-and-reveals pattern for Grid, Clipping Planes, Exploded View,
     // Background, Contrast, Post-Processing, and Shadows.
     const [openRailPanel, setOpenRailPanel] = useState<
-      'grid' | 'clip' | 'explode' | 'bg' | 'contrast' | 'post' | 'shadows' | null
+      | 'grid'
+      | 'lookdev'
+      | 'env'
+      | 'ortho'
+      | 'clip'
+      | 'explode'
+      | 'bg'
+      | 'contrast'
+      | 'post'
+      | 'shadows'
+      | null
     >(null);
     const [loadedFileName, setLoadedFileName] = useState<string | null>(null);
     const [partCount, setPartCount] = useState(0);
@@ -2842,9 +2855,241 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                       className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
                     />
                   </div>
-                  <div className="text-[10px] text-sky-400 leading-tight pt-1 border-t border-slate-700/60">
-                    Grid is a backdrop behind the model that always faces the camera, so it's
-                    visible from every view — true to scale in <b>Orthographic View</b>.
+                </div>
+              )}
+            </div>
+
+            {/* LookDev — material + its dependent controls. No on/off (a material is always
+                in effect), so the icon just opens/closes the panel; it stays highlighted
+                whenever the panel is open. */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => setOpenRailPanel(openRailPanel === 'lookdev' ? null : 'lookdev')}
+                className={railBtnClass(openRailPanel === 'lookdev')}
+                title="LookDev material"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <defs>
+                    <radialGradient id="lookdevSphereGradient" cx="35%" cy="30%" r="70%">
+                      <stop offset="0%" stopColor="#f1f5f9" />
+                      <stop offset="45%" stopColor="#94a3b8" />
+                      <stop offset="100%" stopColor="#334155" />
+                    </radialGradient>
+                  </defs>
+                  <circle cx="12" cy="12" r="9" fill="url(#lookdevSphereGradient)" />
+                </svg>
+              </button>
+              {openRailPanel === 'lookdev' && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('LookDev')}
+                  <select
+                    value={settings.material}
+                    onChange={(e) => onUpdateSettings({ material: e.target.value as MaterialKey })}
+                    className="w-full py-1.5 px-2 rounded-md border text-xs outline-hidden bg-[#1e293b] border-slate-600 text-white"
+                  >
+                    <option value="original">Mapped/Vertex Color</option>
+                    <option value="grey">Grey Clay (50% Roughness)</option>
+                    <option value="custom">Custom</option>
+                    <option value="normal">Normal Map High-Color</option>
+                    <option value="wireframe">Wireframe</option>
+                    <option value="sketch">Sketch / Cel-Shaded</option>
+                    <option value="matcapZebra">Matcap Zebra</option>
+                    <option value="thickness">Wall Thickness Checker</option>
+                  </select>
+
+                  {settings.material === 'wireframe' && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Wireframe Color</span>
+                      <input
+                        type="color"
+                        value={settings.wireframeColorHex}
+                        onChange={(e) => onUpdateSettings({ wireframeColorHex: e.target.value })}
+                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                      />
+                    </div>
+                  )}
+
+                  {settings.material === 'custom' && (
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Color</span>
+                        <input
+                          type="color"
+                          value={settings.customColorHex}
+                          onChange={(e) => onUpdateSettings({ customColorHex: e.target.value })}
+                          className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Roughness</span>
+                          <span className="font-mono text-sky-400">{settings.customRoughnessPercent}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={settings.customRoughnessPercent}
+                          onChange={(e) => onUpdateSettings({ customRoughnessPercent: Number(e.target.value) })}
+                          className="w-full accent-sky-500 cursor-pointer"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Metalness</span>
+                          <span className="font-mono text-sky-400">{settings.customMetalnessPercent}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={settings.customMetalnessPercent}
+                          onChange={(e) => onUpdateSettings({ customMetalnessPercent: Number(e.target.value) })}
+                          className="w-full accent-sky-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {settings.material === 'sketch' && (
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Highlight Color</span>
+                        <input
+                          type="color"
+                          value={settings.sketchHighlightColorHex}
+                          onChange={(e) => onUpdateSettings({ sketchHighlightColorHex: e.target.value })}
+                          className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Midtone Color</span>
+                        <input
+                          type="color"
+                          value={settings.sketchColorHex}
+                          onChange={(e) => onUpdateSettings({ sketchColorHex: e.target.value })}
+                          className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Shadow Color</span>
+                        <input
+                          type="color"
+                          value={settings.sketchShadowColorHex}
+                          onChange={(e) => onUpdateSettings({ sketchShadowColorHex: e.target.value })}
+                          className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col gap-1 pt-1 border-t border-slate-700/60">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>Ghost / Opacity</span>
+                      <span className="font-mono text-sky-400">{settings.opacityPercent}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="10"
+                      max="100"
+                      value={settings.opacityPercent}
+                      onChange={(e) => onUpdateSettings({ opacityPercent: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+
+                  {settings.material === 'thickness' && (
+                    <div className="flex flex-col gap-2 p-2.5 rounded-md border bg-red-950/20 border-red-500/30 text-slate-200">
+                      <div className="flex items-center justify-between font-medium">
+                        <span className="text-red-400 font-semibold">Highlight under:</span>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            step="0.005"
+                            min="0.001"
+                            value={settings.minThicknessInches}
+                            onChange={(e) =>
+                              onUpdateSettings({ minThicknessInches: parseFloat(e.target.value) || 0.08 })
+                            }
+                            className="w-16 text-right py-1 px-1.5 font-mono font-bold rounded-md border bg-[#1e293b] border-slate-600 text-sky-400"
+                          />
+                          <span className="text-slate-400">in.</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between pt-1 border-t border-slate-700/40 text-[11px]">
+                        <span className="flex items-center gap-1.5 font-medium text-red-400">
+                          <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block"></span>
+                          &lt; {settings.minThicknessInches.toFixed(3)}&quot; (Thin Wall)
+                        </span>
+                        <span className="flex items-center gap-1.5 text-slate-400">
+                          <span className="w-2.5 h-2.5 rounded-full bg-slate-400 inline-block"></span>
+                          &ge; Safe
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Environment / Lighting preset */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => setOpenRailPanel(openRailPanel === 'env' ? null : 'env')}
+                className={railBtnClass(openRailPanel === 'env')}
+                title="Environment lighting"
+              >
+                <Globe className="w-4 h-4" />
+              </button>
+              {openRailPanel === 'env' && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Environment')}
+                  <select
+                    value={settings.environmentPreset}
+                    onChange={(e) => onUpdateSettings({ environmentPreset: e.target.value as any })}
+                    className="w-full py-1.5 px-2 rounded-md border text-xs outline-hidden bg-[#1e293b] border-slate-600 text-white"
+                  >
+                    <option value="studio">Studio</option>
+                    <option value="outdoor">Outdoor</option>
+                    <option value="interior">Interior</option>
+                    <option value="sunset">Sunset</option>
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Orthographic / Perspective — the icon itself swaps between a flat square
+                (Orthographic) and a 3D-looking box (Perspective) to show the current mode.
+                Perspective is the only one with a setting worth exposing (Focal Length), so
+                the panel only opens for it. */}
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={() => {
+                  const nextOrtho = !settings.isOrtho;
+                  onUpdateSettings({ isOrtho: nextOrtho });
+                  setOpenRailPanel(nextOrtho ? null : 'ortho');
+                }}
+                className={railBtnClass(!settings.isOrtho)}
+                title={settings.isOrtho ? 'View: Orthographic (click for Perspective)' : 'View: Perspective (click for Orthographic) — O'}
+              >
+                {settings.isOrtho ? <Square className="w-4 h-4" /> : <Box className="w-4 h-4" />}
+              </button>
+              {openRailPanel === 'ortho' && !settings.isOrtho && (
+                <div className={railPanelClass}>
+                  {railPanelHeader('Perspective')}
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span>Focal Length</span>
+                      <span className="font-mono text-sky-400">{settings.focalLength}mm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="12"
+                      max="300"
+                      value={settings.focalLength}
+                      onChange={(e) => onUpdateSettings({ focalLength: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
                   </div>
                 </div>
               )}
