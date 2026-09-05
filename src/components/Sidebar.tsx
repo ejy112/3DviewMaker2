@@ -22,7 +22,6 @@ import {
   FileImage,
   Sparkles,
   Layers,
-  Box,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -172,6 +171,36 @@ function DimensionInput({
   );
 }
 
+interface AccordionSectionProps {
+  title: string;
+  isOpen: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+  bordered?: boolean;
+  isLight?: boolean;
+}
+
+// Shared collapsible section used for Clipping Planes, Post-Processing, and Volume & Cost —
+// keeps their header style, spacing, and toggle behavior identical everywhere they appear.
+function AccordionSection({ title, isOpen, onToggle, children, bordered, isLight }: AccordionSectionProps) {
+  return (
+    <div
+      className={`flex flex-col gap-2 ${
+        bordered ? `pt-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-700'}` : ''
+      }`}
+    >
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between text-[11px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer"
+      >
+        <span>{title}</span>
+        {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+      </button>
+      {isOpen && <div className="flex flex-col gap-2.5 text-xs">{children}</div>}
+    </div>
+  );
+}
+
 export const Sidebar: React.FC<SidebarProps> = ({
   theme,
   onToggleTheme,
@@ -207,6 +236,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const batchInputRef = useRef<HTMLInputElement>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isClippingOpen, setIsClippingOpen] = useState(false);
+  const [isPostProcessingOpen, setIsPostProcessingOpen] = useState(false);
+  const [isVolumeOpen, setIsVolumeOpen] = useState(false);
   const [showExportDriveMenu, setShowExportDriveMenu] = useState(false);
 
   const isLight = theme === 'light';
@@ -343,7 +375,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v0.86
+                  v0.88
                 </span>
               </span>
             </div>
@@ -555,6 +587,80 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
 
+          {/* CLIPPING PLANES PANEL — its own top-level accordion, right below the viewer controls */}
+          <div
+            className={`p-3 rounded-lg border flex flex-col gap-2 ${
+              isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
+            }`}
+          >
+            <button
+              onClick={() => setIsClippingOpen(!isClippingOpen)}
+              className="w-full flex items-center justify-between text-xs font-bold text-sky-500 uppercase cursor-pointer"
+            >
+              <span>Clipping Planes</span>
+              {isClippingOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+
+            {isClippingOpen && (
+              <div className="flex flex-col gap-2.5 pt-1.5 text-xs">
+                {(['x', 'y', 'z'] as const).map((axis) => {
+                  const label = axis === 'x' ? 'Left / Right' : axis === 'y' ? 'Top / Bottom' : 'Front / Back';
+                  const c = settings.clipping[axis];
+                  return (
+                    <div key={axis} className="flex flex-col gap-1">
+                      <label className="flex items-center justify-between cursor-pointer">
+                        <span>{label}</span>
+                        <input
+                          type="checkbox"
+                          checked={c.enabled}
+                          onChange={(e) =>
+                            onUpdateSettings({
+                              clipping: { ...settings.clipping, [axis]: { ...c, enabled: e.target.checked } },
+                            })
+                          }
+                          className="accent-sky-500 w-4 h-4 cursor-pointer"
+                        />
+                      </label>
+                      {c.enabled && (
+                        <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-600">
+                          <input
+                            type="range"
+                            min="-10"
+                            max="10"
+                            step="0.05"
+                            value={c.offsetInches}
+                            onChange={(e) =>
+                              onUpdateSettings({
+                                clipping: {
+                                  ...settings.clipping,
+                                  [axis]: { ...c, offsetInches: Number(e.target.value) },
+                                },
+                              })
+                            }
+                            className="flex-1 accent-sky-500 cursor-pointer"
+                          />
+                          <button
+                            onClick={() =>
+                              onUpdateSettings({
+                                clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
+                              })
+                            }
+                            className={`text-xs font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
+                              c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
+                            }`}
+                            title="Flip which side is cut away"
+                          >
+                            Flip
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* EXPORT PANEL */}
           <div
             className={`p-3 rounded-lg border flex flex-col gap-2.5 ${
@@ -714,7 +820,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 >
                   <option value="original">Mapped/Vertex Color</option>
                   <option value="grey">Grey Clay (50% Roughness)</option>
-                  <option value="matteGrey">Matte Grey</option>
+                  <option value="matteGrey">Matte</option>
                   <option value="redClay">Red Clay</option>
                   <option value="gold">Reflective Metal (Gold)</option>
                   <option value="chrome">Glossy Chrome</option>
@@ -728,7 +834,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                 {settings.material === 'wireframe' && (
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-[11px] text-slate-400">Wireframe Color</span>
+                    <span className="text-slate-400">Wireframe Color</span>
                     <input
                       type="color"
                       value={settings.wireframeColorHex}
@@ -738,15 +844,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </div>
                 )}
 
-                {settings.material === 'sketch' && (
+                {settings.material === 'matteGrey' && (
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-[11px] text-slate-400">Sketch Color</span>
+                    <span className="text-slate-400">Matte Color</span>
                     <input
                       type="color"
-                      value={settings.sketchColorHex}
-                      onChange={(e) => onUpdateSettings({ sketchColorHex: e.target.value })}
+                      value={settings.matteColorHex}
+                      onChange={(e) => onUpdateSettings({ matteColorHex: e.target.value })}
                       className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
                     />
+                  </div>
+                )}
+
+                {/* Cel-shaded tri-tone: independent shadow / midtone / highlight colors instead
+                    of one flat hue shaded by brightness */}
+                {settings.material === 'sketch' && (
+                  <div className="flex flex-col gap-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Highlight Color</span>
+                      <input
+                        type="color"
+                        value={settings.sketchHighlightColorHex}
+                        onChange={(e) => onUpdateSettings({ sketchHighlightColorHex: e.target.value })}
+                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Midtone Color</span>
+                      <input
+                        type="color"
+                        value={settings.sketchColorHex}
+                        onChange={(e) => onUpdateSettings({ sketchColorHex: e.target.value })}
+                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Shadow Color</span>
+                      <input
+                        type="color"
+                        value={settings.sketchShadowColorHex}
+                        onChange={(e) => onUpdateSettings({ sketchShadowColorHex: e.target.value })}
+                        className="w-7 h-7 p-0 border border-slate-600 rounded cursor-pointer bg-transparent"
+                      />
+                    </div>
                   </div>
                 )}
 
@@ -788,11 +928,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           sensitivity={0.002}
                           isLight={isLight}
                         />
-                        <span className="text-slate-400 text-[11px]">in.</span>
+                        <span className="text-slate-400">in.</span>
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-700/40">
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-700/40">
                       <span className="flex items-center gap-1.5 font-medium text-red-400">
                         <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block"></span>
                         &lt; {settings.minThicknessInches.toFixed(3)}&quot; (Thin Wall)
@@ -855,126 +995,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </div>
                 )}
 
-                <div className="text-[10px] text-slate-500 leading-tight -mt-1">
+                <div className="text-xs text-slate-500 leading-tight -mt-1">
                   * Grid options moved to the view area — see the grid icon top-right of the viewport.
+                  Clipping Planes moved below the Viewer panel.
                 </div>
 
-                {/* Clipping Planes */}
-                <div
-                  className={`pt-2 border-t flex flex-col gap-2 ${
-                    isLight ? 'border-slate-200' : 'border-slate-700'
-                  }`}
-                >
-                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Clipping Planes
-                  </div>
-                  {(['x', 'y', 'z'] as const).map((axis) => {
-                    const label = axis === 'x' ? 'Left / Right' : axis === 'y' ? 'Top / Bottom' : 'Front / Back';
-                    const c = settings.clipping[axis];
-                    return (
-                      <div key={axis} className="flex flex-col gap-1">
-                        <label className="flex items-center justify-between cursor-pointer">
-                          <span>{label}</span>
-                          <input
-                            type="checkbox"
-                            checked={c.enabled}
-                            onChange={(e) =>
-                              onUpdateSettings({
-                                clipping: { ...settings.clipping, [axis]: { ...c, enabled: e.target.checked } },
-                              })
-                            }
-                            className="accent-sky-500 w-4 h-4 cursor-pointer"
-                          />
-                        </label>
-                        {c.enabled && (
-                          <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-600">
-                            <input
-                              type="range"
-                              min="-10"
-                              max="10"
-                              step="0.05"
-                              value={c.offsetInches}
-                              onChange={(e) =>
-                                onUpdateSettings({
-                                  clipping: {
-                                    ...settings.clipping,
-                                    [axis]: { ...c, offsetInches: Number(e.target.value) },
-                                  },
-                                })
-                              }
-                              className="flex-1 accent-sky-500 cursor-pointer"
-                            />
-                            <button
-                              onClick={() =>
-                                onUpdateSettings({
-                                  clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
-                                })
-                              }
-                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
-                                c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
-                              }`}
-                              title="Flip which side is cut away"
-                            >
-                              Flip
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Post-Processing: SSAO + Anti-aliasing */}
-                <div
-                  className={`pt-2 border-t flex flex-col gap-2 ${
-                    isLight ? 'border-slate-200' : 'border-slate-700'
-                  }`}
-                >
-                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Post-Processing
-                  </div>
-
-                  <label className="flex items-center justify-between cursor-pointer">
-                    <span>SSAO (Ambient Occlusion)</span>
-                    <input
-                      type="checkbox"
-                      checked={settings.ssaoEnabled}
-                      onChange={(e) => onUpdateSettings({ ssaoEnabled: e.target.checked })}
-                      className="accent-sky-500 w-4 h-4 cursor-pointer"
-                    />
-                  </label>
-                  {settings.ssaoEnabled && (
-                    <div className="flex items-center justify-between text-[11px] pl-2 border-l-2 border-slate-600">
-                      <span className="text-slate-400">Radius</span>
-                      <input
-                        type="range"
-                        min="1"
-                        max="64"
-                        value={settings.ssaoRadius}
-                        onChange={(e) => onUpdateSettings({ ssaoRadius: Number(e.target.value) })}
-                        className="flex-1 mx-2 accent-sky-500 cursor-pointer"
-                      />
-                      <span className="font-mono text-sky-400">{settings.ssaoRadius}</span>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between text-xs">
-                    <span>Anti-aliasing</span>
-                    <select
-                      value={settings.antialiasMode}
-                      onChange={(e) => onUpdateSettings({ antialiasMode: e.target.value as any })}
-                      className={`py-1 px-2 rounded-md border text-xs outline-hidden ${
-                        isLight
-                          ? 'bg-slate-100 border-slate-300 text-slate-800'
-                          : 'bg-[#1e293b] border-slate-600 text-white'
-                      }`}
-                    >
-                      <option value="none">Off</option>
-                      <option value="fxaa">FXAA (fast)</option>
-                      <option value="smaa">SMAA (higher quality)</option>
-                    </select>
-                  </div>
-                </div>
                 <label className="flex items-center justify-between text-xs cursor-pointer">
                   <span>Cast Shadows (C)</span>
                   <input
@@ -987,9 +1012,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </label>
 
                 {settings.castShadows && (
-                  <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600">
+                  <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600 text-xs">
                     <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between text-[11px]">
+                      <div className="flex items-center justify-between">
                         <span className="text-slate-400">Softness</span>
                         <span className="font-mono text-sky-400">{settings.shadowSoftness}%</span>
                       </div>
@@ -1003,7 +1028,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       />
                     </div>
                     <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between text-[11px]">
+                      <div className="flex items-center justify-between">
                         <span className="text-slate-400">Darkness</span>
                         <span className="font-mono text-sky-400">{settings.shadowDarkness}%</span>
                       </div>
@@ -1016,14 +1041,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         className="w-full accent-sky-500 cursor-pointer"
                       />
                     </div>
-                    <div className="flex items-center justify-between text-[11px]">
+                    <div className="flex items-center justify-between">
                       <span className="text-slate-400">Shadow Map Resolution</span>
                       <select
                         value={settings.shadowMapResolution}
                         onChange={(e) =>
                           onUpdateSettings({ shadowMapResolution: Number(e.target.value) as 1024 | 2048 | 4096 })
                         }
-                        className={`py-1 px-1.5 rounded-md border text-[11px] outline-hidden ${
+                        className={`py-1 px-1.5 rounded-md border text-xs outline-hidden ${
                           isLight
                             ? 'bg-slate-100 border-slate-300 text-slate-800'
                             : 'bg-[#1e293b] border-slate-600 text-white'
@@ -1112,9 +1137,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </label>
 
                   {settings.vignetteEnabled && (
-                    <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-[11px] text-slate-400">Vignette Color</span>
+                    <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Vignette Color</span>
                         <div className="flex items-center gap-1.5">
                           <input
                             type="color"
@@ -1136,7 +1161,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 onUpdateSettings({ vignetteColorHex: hex });
                               }
                             }}
-                            className={`w-16 text-center py-0.5 px-1 font-mono text-[11px] rounded border text-sky-400 ${
+                            className={`w-16 text-center py-0.5 px-1 font-mono rounded border text-sky-400 ${
                               isLight
                                 ? 'bg-slate-100 border-slate-300 text-slate-900'
                                 : 'bg-[#1e293b] border-slate-600'
@@ -1146,7 +1171,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       </div>
 
                       <div className="flex flex-col gap-1">
-                        <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <div className="flex items-center justify-between text-slate-400">
                           <span>Intensity</span>
                           <span className="font-mono text-sky-400">
                             {settings.vignetteIntensityPercent}%
@@ -1169,6 +1194,89 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                   )}
                 </div>
+
+                {/* Post-Processing: SSAO + Anti-aliasing — moved to right after Vignette,
+                    collapsed by default like the other heavier sub-sections */}
+                <AccordionSection
+                  title="Post-Processing"
+                  isOpen={isPostProcessingOpen}
+                  onToggle={() => setIsPostProcessingOpen(!isPostProcessingOpen)}
+                  bordered
+                  isLight={isLight}
+                >
+                  <label className="flex items-center justify-between cursor-pointer">
+                    <span>SSAO (Ambient Occlusion)</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.ssaoEnabled}
+                      onChange={(e) => onUpdateSettings({ ssaoEnabled: e.target.checked })}
+                      className="accent-sky-500 w-4 h-4 cursor-pointer"
+                    />
+                  </label>
+                  {settings.ssaoEnabled && (
+                    <div className="flex flex-col gap-2 pl-2 border-l-2 border-slate-600">
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Radius</span>
+                          <span className="font-mono text-sky-400">{settings.ssaoRadius}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="1"
+                          max="100"
+                          value={settings.ssaoRadius}
+                          onChange={(e) => onUpdateSettings({ ssaoRadius: Number(e.target.value) })}
+                          className="w-full accent-sky-500 cursor-pointer"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Intensity</span>
+                          <span className="font-mono text-sky-400">{settings.ssaoIntensity}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="200"
+                          value={settings.ssaoIntensity}
+                          onChange={(e) => onUpdateSettings({ ssaoIntensity: Number(e.target.value) })}
+                          className="w-full accent-sky-500 cursor-pointer"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Bias</span>
+                          <span className="font-mono text-sky-400">{settings.ssaoBias}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={settings.ssaoBias}
+                          onChange={(e) => onUpdateSettings({ ssaoBias: Number(e.target.value) })}
+                          className="w-full accent-sky-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between">
+                    <span>Anti-aliasing</span>
+                    <select
+                      value={settings.antialiasMode}
+                      onChange={(e) => onUpdateSettings({ antialiasMode: e.target.value as any })}
+                      className={`py-1 px-2 rounded-md border text-xs outline-hidden ${
+                        isLight
+                          ? 'bg-slate-100 border-slate-300 text-slate-800'
+                          : 'bg-[#1e293b] border-slate-600 text-white'
+                      }`}
+                    >
+                      <option value="none">Off</option>
+                      <option value="fxaa">FXAA (fast)</option>
+                      <option value="smaa">SMAA (higher quality)</option>
+                    </select>
+                  </div>
+                </AccordionSection>
 
                 {/* Scale, Size & Rotation Panel (shown when model loaded) */}
                 {hasModel && (
@@ -1320,17 +1428,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                     {/* Volume, Weight & Cost Estimate */}
                     {volumeStats && (
-                      <div className="flex flex-col gap-2 pt-1.5 border-t border-slate-700/40">
-                        <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                          <Box className="w-3.5 h-3.5" />
-                          <span>Volume &amp; Cost Estimate</span>
-                        </div>
+                      <AccordionSection
+                        title="Volume & Cost Estimate"
+                        isOpen={isVolumeOpen}
+                        onToggle={() => setIsVolumeOpen(!isVolumeOpen)}
+                        bordered
+                        isLight={isLight}
+                      >
                         {!volumeStats.isWatertight && (
-                          <div className="text-[10px] text-amber-400 leading-tight">
+                          <div className="text-xs text-amber-400 leading-tight">
                             Mesh isn&apos;t fully watertight — volume/weight may be approximate.
                           </div>
                         )}
-                        <div className="grid grid-cols-2 gap-y-1 text-[11px]">
+                        <div className="grid grid-cols-2 gap-y-1">
                           <span className="text-slate-400">Volume</span>
                           <span className="text-right font-mono text-sky-400">
                             {volumeStats.volumeCm3.toFixed(2)} cm³
@@ -1344,7 +1454,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             ${volumeStats.estimatedCost.toFixed(2)}
                           </span>
                         </div>
-                        <div className="flex items-center justify-between text-[11px]">
+                        <div className="flex items-center justify-between">
                           <span className="text-slate-400">Density (g/cm³)</span>
                           <input
                             type="number"
@@ -1359,7 +1469,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             }`}
                           />
                         </div>
-                        <div className="flex items-center justify-between text-[11px]">
+                        <div className="flex items-center justify-between">
                           <span className="text-slate-400">Cost / kg (USD)</span>
                           <input
                             type="number"
@@ -1374,7 +1484,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             }`}
                           />
                         </div>
-                      </div>
+                      </AccordionSection>
                     )}
                   </div>
                 )}

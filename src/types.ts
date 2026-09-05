@@ -88,7 +88,11 @@ export interface ViewerSettings {
   // Lookdev extras
   opacityPercent: number; // "ghost" slider, applies to any material
   wireframeColorHex: string;
+  matteColorHex: string;
+  // Cel-shaded tri-tone: sketchColorHex is the midtone, the other two are the lit/shadowed bands
   sketchColorHex: string;
+  sketchHighlightColorHex: string;
+  sketchShadowColorHex: string;
 
   // Environment / lighting
   environmentPreset: EnvironmentPreset;
