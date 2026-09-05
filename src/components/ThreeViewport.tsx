@@ -3318,24 +3318,19 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
               )}
             </div>
 
-            {/* Contrast — always "active" (100% = neutral), so a click just snaps between 100%
-                and 250%; the slider inside dials in anything else. */}
+            {/* Contrast — like Exploded View, the panel's open/closed state is independent of
+                the slider value: clicking the icon just opens/closes the panel, so dragging back
+                to 100% (or anywhere else) never closes it out from under you and never resets
+                the value on its own. Only the panel's own X, or clicking the icon again, closes
+                it, and the last value dragged to is always what's kept. */}
             <div className="flex flex-col items-end gap-2">
               <button
-                onClick={() => {
-                  if (settings.contrastPercent !== 100) {
-                    onUpdateSettings({ contrastPercent: 100 });
-                    setOpenRailPanel(null);
-                  } else {
-                    onUpdateSettings({ contrastPercent: 250 });
-                    setOpenRailPanel('contrast');
-                  }
-                }}
-                className={railBtnClass(settings.contrastPercent !== 100)}
+                onClick={() => setOpenRailPanel(openRailPanel === 'contrast' ? null : 'contrast')}
+                className={railBtnClass(settings.contrastPercent !== 100 || openRailPanel === 'contrast')}
                 title={
                   settings.contrastPercent !== 100
-                    ? 'Contrast: boosted (click to reset to 100%)'
-                    : 'Contrast: 100% (click to boost to 250%)'
+                    ? `Contrast: ${settings.contrastPercent}% (click to open/close panel)`
+                    : 'Contrast: 100% (click to open/close panel)'
                 }
               >
                 <ContrastIcon className="w-4 h-4" />
