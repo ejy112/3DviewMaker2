@@ -225,10 +225,16 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const isolatedPartIndexRef = useRef<number | null>(null);
     const preIsolateVisibilityRef = useRef<boolean[] | null>(null);
     const [isolatedPartName, setIsolatedPartName] = useState<string | null>(null);
-    // Last pointer position over the canvas, in normalized device coords — kept live via a
-    // pointermove listener so the I-key handler (which fires on window, not the canvas) always
-    // has somewhere to raycast from without needing the mouse event itself.
-    const lastPointerNDCRef = useRef<{ x: number; y: number } | null>(null);
+    // Whichever part the pointer is currently over — kept live by the canvas's own pointermove
+    // handler (see the hover tooltip in the JSX below) via a continuous raycast, not just tracked
+    // on demand. The I and H hotkeys (which fire on window, not the canvas) read
+    // hoveredPartIndexRef directly rather than raycasting fresh from the last known pointer
+    // position, since this is already being kept current for the tooltip anyway.
+    const [hoveredPart, setHoveredPart] = useState<{ index: number; name: string; x: number; y: number } | null>(
+      null
+    );
+    const hoveredPartIndexRef = useRef<number | null>(null);
+    hoveredPartIndexRef.current = hoveredPart ? hoveredPart.index : null;
     const isolateRaycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
     // Click-to-select: which part is selected (blue THREE.BoxHelper outline, see selectPart) and
     // where the pointer went down, so a click-drag orbit isn't mistaken for a click-to-select.
@@ -320,6 +326,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const clipPlaneXRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0));
     const clipPlaneYRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
     const clipPlaneZRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0));
+    // Per-part clip planes while Exploded View is active — each part's own copy of the base
+    // planes, shifted by that part's current explosion displacement, so a clip keeps cutting
+    // through the model's resting/assembled geometry instead of through wherever empty space the
+    // part has since moved away to. Only populated/consulted while exploded; unexploded models
+    // keep using the shared clipPlaneX/Y/ZRef instances above. Cleared in cleanupScene — a plain
+    // Map holds strong references to its keys, so old parts would otherwise never be released.
+    const batchPartPlanesRef = useRef<Map<THREE.Object3D, THREE.Plane[]>>(new Map());
+    const wasExplodedClipModeRef = useRef<boolean>(false);
     // Which of the three planes are currently active, and the array handed to materials.
     // The active *count* is baked into each material's compiled shader (NUM_CLIPPING_PLANES),
     // so we only need to force a recompile when a plane is added/removed, not when an
@@ -602,6 +616,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       setThicknessProgress(null);
       batchPartsRef.current = [];
       batchGroupCenterRef.current.set(0, 0, 0);
+      batchPartPlanesRef.current.clear();
       if (selectedPartIndexRef.current !== null) selectPart(null);
       if (thicknessMaterialRef.current) {
         thicknessMaterialRef.current.uniforms.uIsReady.value = 0.0;
@@ -1307,8 +1322,49 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         aoPassRef.current.normalMaterial.clippingPlanes = nextClippingPlanes;
       }
 
-      if (countChanged && currentModelRef.current) {
-        const clippingActive = activeClipPlanes.length > 0;
+      const clippingActive = activeClipPlanes.length > 0;
+      const isExploded = batchPartsRef.current.length > 1 && (settingsRef.current.explodeAmount || 0) > 0;
+      // A part-clipping-mode transition (entering/leaving the exploded+clipping branch below)
+      // needs the same one-time mesh reassignment countChanged triggers — otherwise un-exploding
+      // would leave every mesh still pointing at its now-stale per-part plane array forever.
+      const explodedClipModeChanged = isExploded !== wasExplodedClipModeRef.current;
+      wasExplodedClipModeRef.current = isExploded;
+
+      if (isExploded && clippingActive && currentModelRef.current) {
+        // Per-part clipping: each part's plane equation is the base plane shifted by that part's
+        // own world-space explosion displacement, so the cut stays fixed to the model's
+        // resting/assembled geometry as parts move away from it, rather than staying fixed in
+        // world space and slicing through wherever the part used to be.
+        const rot = currentModelRef.current.rotation;
+        const scale = dimensionsRef.current.scaleFactor || 1;
+        batchPartsRef.current.forEach((part) => {
+          const worldDelta = part.object.position.clone().sub(part.basePosition).applyEuler(rot).multiplyScalar(scale);
+
+          let partPlanes = batchPartPlanesRef.current.get(part.object);
+          if (!partPlanes || partPlanes.length !== activeClipPlanes.length) {
+            partPlanes = activeClipPlanes.map(() => new THREE.Plane());
+            batchPartPlanesRef.current.set(part.object, partPlanes);
+          }
+          for (let i = 0; i < activeClipPlanes.length; i++) {
+            const basePlane = activeClipPlanes[i];
+            partPlanes[i].normal.copy(basePlane.normal);
+            partPlanes[i].constant = basePlane.constant - basePlane.normal.dot(worldDelta);
+          }
+
+          part.object.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const mesh = child as THREE.Mesh;
+              const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+              mats.forEach((m) => {
+                const clipPlanesChanged = m.clippingPlanes !== partPlanes;
+                m.clippingPlanes = partPlanes!;
+                applyClipSideToMaterial(m, true);
+                if (countChanged || clipPlanesChanged) m.needsUpdate = true;
+              });
+            }
+          });
+        });
+      } else if ((countChanged || explodedClipModeChanged) && currentModelRef.current) {
         currentModelRef.current.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
             const mesh = child as THREE.Mesh;
@@ -2116,7 +2172,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // Explode/Loaded-Meshes work for any multi-part model, not only files brought in through the
     // dedicated multi-file Batch Load flow. A part must have at least one mesh descendant to
     // count (skips empty transform/helper nodes); fewer than 2 such nodes means there's nothing
-    // separable, so it's left as a single whole model.
+    // separable at that level, so two fallbacks are tried before giving up: unwrap a single
+    // top-level wrapper group one level deeper (common when an exporter nests everything under
+    // one root transform node), then fall back to every individual mesh in the file as its own
+    // part (finest-grained — still lets Isolate/click-select/Loaded-Meshes work on a flat GLB
+    // with no named sub-groups at all).
     const detectExplodableParts = (root: THREE.Object3D) => {
       const hasMeshDescendant = (obj: THREE.Object3D) => {
         let found = false;
@@ -2126,10 +2186,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         return found;
       };
 
-      const candidates = root.children.filter(hasMeshDescendant);
+      let candidates = root.children.filter(hasMeshDescendant);
+      if (candidates.length === 1 && candidates[0].children.filter(hasMeshDescendant).length >= 2) {
+        candidates = candidates[0].children.filter(hasMeshDescendant);
+      }
       if (candidates.length < 2) {
-        batchPartsRef.current = [];
-        return;
+        const meshNodes: THREE.Mesh[] = [];
+        root.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) meshNodes.push(child as THREE.Mesh);
+        });
+        if (meshNodes.length >= 2) {
+          candidates = meshNodes;
+        } else {
+          batchPartsRef.current = [];
+          return;
+        }
       }
 
       root.updateMatrixWorld(true);
@@ -2222,32 +2293,18 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // I, hovering a part: solos it (hides every other loaded part) and snapshots the prior
     // visibility of all of them so a second I press — regardless of what's hovered by then,
     // per spec — restores precisely that, not a blanket "show all". No-op if there's nothing to
-    // isolate (single-part model) or nothing under the cursor.
+    // isolate (single-part model) or nothing under the cursor. hoveredPartIndexRef is kept live
+    // by the canvas's own pointermove handler (see the hover tooltip), so this just reads it.
     const toggleIsolateHoveredPart = () => {
       if (isolatedPartIndexRef.current !== null) {
         exitIsolate();
         return;
       }
 
-      if (
-        batchPartsRef.current.length <= 1 ||
-        !lastPointerNDCRef.current ||
-        !activeCameraRef.current ||
-        !currentModelRef.current
-      ) {
+      const hitIndex = hoveredPartIndexRef.current;
+      if (batchPartsRef.current.length <= 1 || hitIndex === null || !batchPartsRef.current[hitIndex]) {
         return;
       }
-
-      isolateRaycasterRef.current.setFromCamera(
-        lastPointerNDCRef.current as THREE.Vector2,
-        activeCameraRef.current
-      );
-      const hits = isolateRaycasterRef.current.intersectObject(currentModelRef.current, true);
-      const hit = hits.find((h) => h.object.visible);
-      if (!hit) return;
-
-      const hitIndex = getPartIndexFromObject(hit.object);
-      if (hitIndex === null) return;
 
       preIsolateVisibilityRef.current = batchPartsRef.current.map((part) => part.object.visible);
       isolatedPartIndexRef.current = hitIndex;
@@ -2263,22 +2320,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     };
 
     // H: toggle visibility of whichever part is currently selected (click-to-select), or failing
-    // that whatever's under the pointer right now — same hover-raycast the I key uses.
+    // that whatever's currently hovered.
     const toggleSelectedOrHoveredVisibility = () => {
       if (selectedPartIndexRef.current !== null) {
         togglePartVisibility(selectedPartIndexRef.current);
         return;
       }
-      if (!lastPointerNDCRef.current || !activeCameraRef.current || !currentModelRef.current) return;
-      isolateRaycasterRef.current.setFromCamera(
-        lastPointerNDCRef.current as THREE.Vector2,
-        activeCameraRef.current
-      );
-      const hits = isolateRaycasterRef.current.intersectObject(currentModelRef.current, true);
-      const hit = hits.find((h) => h.object.visible);
-      if (!hit) return;
-      const hitIndex = getPartIndexFromObject(hit.object);
-      if (hitIndex === null) return;
+      const hitIndex = hoveredPartIndexRef.current;
+      if (hitIndex === null || !batchPartsRef.current[hitIndex]) return;
       togglePartVisibility(hitIndex);
     };
 
@@ -3143,14 +3192,41 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       };
       canvas.addEventListener('pointerup', handlePointerUp);
 
+      // Continuous hover tracking, for the tooltip and as the source the I/H hotkeys read from.
+      // Skipped while any mouse button is held (event.buttons !== 0) — mid-orbit-drag isn't
+      // "hovering" a part, and re-raycasting on every drag tick would just be wasted work.
       const handlePointerMove = (event: PointerEvent) => {
+        if (event.buttons !== 0 || !activeCameraRef.current || !currentModelRef.current) {
+          if (hoveredPartIndexRef.current !== null) setHoveredPart(null);
+          return;
+        }
         const rect = canvas.getBoundingClientRect();
-        lastPointerNDCRef.current = {
+        const ndc = {
           x: ((event.clientX - rect.left) / rect.width) * 2 - 1,
           y: -((event.clientY - rect.top) / rect.height) * 2 + 1,
         };
+        isolateRaycasterRef.current.setFromCamera(ndc as THREE.Vector2, activeCameraRef.current);
+        const hits = isolateRaycasterRef.current.intersectObjects(currentModelRef.current.children, true);
+        const hit = hits.find((h) => h.object.visible);
+
+        if (hit) {
+          const matchedIdx = getPartIndexFromObject(hit.object);
+          if (matchedIdx !== null && batchPartsRef.current[matchedIdx]) {
+            setHoveredPart({
+              index: matchedIdx,
+              name: getPartName(batchPartsRef.current[matchedIdx].object, matchedIdx),
+              x: event.clientX,
+              y: event.clientY,
+            });
+            return;
+          }
+        }
+        if (hoveredPartIndexRef.current !== null) setHoveredPart(null);
       };
       canvas.addEventListener('pointermove', handlePointerMove);
+
+      const handlePointerLeave = () => setHoveredPart(null);
+      canvas.addEventListener('pointerleave', handlePointerLeave);
 
       // Background/Vignette backdrop — drawn FIRST (as VignetteBackgroundPass, an opaque
       // full-screen plate smoothstepping from the background color at center to the vignette
@@ -3332,6 +3408,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         canvas.removeEventListener('pointerdown', handlePointerDown);
         canvas.removeEventListener('pointerup', handlePointerUp);
         canvas.removeEventListener('pointermove', handlePointerMove);
+        canvas.removeEventListener('pointerleave', handlePointerLeave);
         cleanupScene();
         composerRef.current?.dispose();
         renderer.dispose();
@@ -3483,9 +3560,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       requestRender();
     }, [settings.ssaoEnabled, settings.ssaoRadius, settings.ssaoIntensity, settings.ssaoBias, settings.antialiasMode]);
 
-    // Exploded view
+    // Exploded view — also re-runs clipping plane placement, since a clip plane active while
+    // exploded needs its per-part compensation (see updateClippingPlanes) recomputed on every
+    // step of the explode drag, not just when the plane's own offset/enabled state changes.
     useEffect(() => {
       applyExplode();
+      updateClippingPlanes();
       requestRender();
     }, [settings.explodeAmount]);
 
@@ -4542,6 +4622,25 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
             >
               <X className="w-3.5 h-3.5" />
             </button>
+          </div>
+        )}
+
+        {/* Hover Part Tooltip — follows the cursor while hovering a mesh, naming it and noting
+            the two hotkeys that act on whatever's hovered (H to hide, I to isolate). */}
+        {hoveredPart && (
+          <div
+            className="fixed z-40 px-2.5 py-1.5 rounded-lg bg-slate-900/95 text-white text-[11px] font-medium border border-sky-500/50 shadow-xl pointer-events-none flex items-center gap-2 backdrop-blur-sm transform -translate-x-1/2 -translate-y-full mb-3"
+            style={{ left: hoveredPart.x, top: hoveredPart.y }}
+          >
+            <span className="font-semibold text-sky-400">{hoveredPart.name}</span>
+            <span className="text-[10px] text-slate-400 border-l border-slate-700 pl-2 flex items-center gap-1.5">
+              <span>
+                Click to select • <kbd className="px-1 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">H</kbd> to hide
+              </span>
+              <span>
+                • <kbd className="px-1 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">I</kbd> to isolate
+              </span>
+            </span>
           </div>
         )}
 
