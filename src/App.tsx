@@ -61,9 +61,9 @@ export default function App() {
     environmentPreset: 'studio',
 
     clipping: {
-      x: { enabled: false, offsetInches: 0, flip: false },
-      y: { enabled: false, offsetInches: 0, flip: false },
-      z: { enabled: false, offsetInches: 0, flip: false },
+      x: { enabled: false, offsetPercent: 0, offsetInches: 0, flip: false },
+      y: { enabled: false, offsetPercent: 0, offsetInches: 0, flip: false },
+      z: { enabled: false, offsetPercent: 0, offsetInches: 0, flip: false },
     },
 
     antialiasMode: 'none',
@@ -76,6 +76,10 @@ export default function App() {
     costPerKgUSD: 25,
 
     explodeAmount: 0,
+
+    turntableDirection: 'cw',
+    turntableSpeed: 'normal',
+    videoEasing: false,
   });
 
   // Model Dimensions & Transform
@@ -98,6 +102,7 @@ export default function App() {
   const [volumeStats, setVolumeStats] = useState<VolumeStats | null>(null);
   const [parts, setParts] = useState<LoadedPart[]>([]);
   const [isolatedPartName, setIsolatedPartName] = useState<string | null>(null);
+  const [selectedPartIndex, setSelectedPartIndex] = useState<number | null>(null);
 
   // Export State
   const [isExportingImage, setIsExportingImage] = useState(false);
@@ -161,6 +166,10 @@ export default function App() {
 
   const handleDriveModelsSelected = (files: File[]) => {
     viewportRef.current?.loadModelsFromFiles(files);
+  };
+
+  const handleDeleteHiddenParts = () => {
+    viewportRef.current?.deleteHiddenParts();
   };
 
   // Turnaround Sheet Image Export
@@ -305,6 +314,8 @@ export default function App() {
         setSettings((prev) => ({ ...prev, isOrtho: !prev.isOrtho }));
       } else if (key === 'i') {
         viewportRef.current?.toggleIsolateHoveredPart();
+      } else if (key === 'h') {
+        viewportRef.current?.toggleSelectedOrHoveredVisibility();
       }
     },
     [isFullscreen, driveModalOpen, isMobileSidebarOpen, hasModel, resolution]
@@ -400,6 +411,9 @@ export default function App() {
         parts={parts}
         onTogglePartVisibility={handleTogglePartVisibility}
         onDeletePart={handleDeletePart}
+        onDeleteHiddenParts={handleDeleteHiddenParts}
+        selectedPartIndex={selectedPartIndex}
+        onSelectPart={setSelectedPartIndex}
         isIsolated={isolatedPartName !== null}
       />
 
@@ -422,6 +436,8 @@ export default function App() {
           onVolumeComputed={setVolumeStats}
           onPartsChanged={setParts}
           onIsolateChanged={setIsolatedPartName}
+          selectedPartIndex={selectedPartIndex}
+          onSelectPart={setSelectedPartIndex}
           isFullscreen={isFullscreen}
         />
       </main>

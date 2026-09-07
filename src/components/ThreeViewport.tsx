@@ -97,6 +97,9 @@ export interface ThreeViewportHandle {
   ) => void;
   togglePartVisibility: (index: number) => void;
   deletePart: (index: number) => void;
+  deleteHiddenParts: () => void;
+  selectPart: (index: number | null) => void;
+  toggleSelectedOrHoveredVisibility: () => void;
   toggleIsolateHoveredPart: () => void;
 }
 
@@ -124,6 +127,10 @@ interface ThreeViewportProps {
   // Fires whenever isolate mode (hover a part, press I) is entered or exited, with the isolated
   // part's display name, or null once exited — lets the sidebar show/disable accordingly.
   onIsolateChanged?: (isolatedPartName: string | null) => void;
+  // Click-to-select a mesh in the viewport (blue bounding-box highlight). Controlled from the
+  // parent so a click in the Loaded Meshes list can select/deselect the same part.
+  selectedPartIndex?: number | null;
+  onSelectPart?: (index: number | null) => void;
 }
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>(
@@ -142,6 +149,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       onPartsChanged,
       isFullscreen,
       onIsolateChanged,
+      selectedPartIndex,
+      onSelectPart,
     },
     ref
   ) => {
@@ -184,6 +193,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // has somewhere to raycast from without needing the mouse event itself.
     const lastPointerNDCRef = useRef<{ x: number; y: number } | null>(null);
     const isolateRaycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
+    // Click-to-select: which part is selected (blue THREE.BoxHelper outline, see selectPart) and
+    // where the pointer went down, so a click-drag orbit isn't mistaken for a click-to-select.
+    const selectedPartIndexRef = useRef<number | null>(null);
+    const selectionHelperRef = useRef<THREE.BoxHelper | null>(null);
+    const pointerDownPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
     const [thicknessProgress, setThicknessProgress] = useState<number | null>(null);
     const thicknessCalculatingRef = useRef<boolean>(false);
 
@@ -514,6 +528,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       setThicknessProgress(null);
       batchPartsRef.current = [];
       batchGroupCenterRef.current.set(0, 0, 0);
+      if (selectedPartIndexRef.current !== null) selectPart(null);
       if (thicknessMaterialRef.current) {
         thicknessMaterialRef.current.uniforms.uIsReady.value = 0.0;
       }
@@ -1849,10 +1864,33 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       );
     };
 
+    // Click-to-select a part: draws a blue bounding-box outline around it and notifies the
+    // parent (Sidebar highlights the matching Loaded Meshes row). Passing null (or clicking empty
+    // space / the same part again) clears the selection.
+    const selectPart = (index: number | null) => {
+      selectedPartIndexRef.current = index;
+      onSelectPart?.(index);
+      if (selectionHelperRef.current) {
+        const part = index !== null ? batchPartsRef.current[index] : null;
+        if (part && part.object.visible) {
+          selectionHelperRef.current.setFromObject(part.object);
+          selectionHelperRef.current.visible = true;
+        } else {
+          selectionHelperRef.current.visible = false;
+        }
+      }
+      requestRender();
+    };
+
     const togglePartVisibility = (index: number) => {
       const part = batchPartsRef.current[index];
       if (!part) return;
       part.object.visible = !part.object.visible;
+      if (!part.object.visible && selectedPartIndexRef.current === index) {
+        selectPart(null);
+      } else if (part.object.visible && selectedPartIndexRef.current === index) {
+        selectPart(index);
+      }
       notifyPartsChanged();
       requestRender();
     };
@@ -1929,6 +1967,26 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       recenterView();
     };
 
+    // H: toggle visibility of whichever part is currently selected (click-to-select), or failing
+    // that whatever's under the pointer right now — same hover-raycast the I key uses.
+    const toggleSelectedOrHoveredVisibility = () => {
+      if (selectedPartIndexRef.current !== null) {
+        togglePartVisibility(selectedPartIndexRef.current);
+        return;
+      }
+      if (!lastPointerNDCRef.current || !activeCameraRef.current || !currentModelRef.current) return;
+      isolateRaycasterRef.current.setFromCamera(
+        lastPointerNDCRef.current as THREE.Vector2,
+        activeCameraRef.current
+      );
+      const hits = isolateRaycasterRef.current.intersectObject(currentModelRef.current, true);
+      const hit = hits.find((h) => h.object.visible);
+      if (!hit) return;
+      const hitIndex = getPartIndexFromObject(hit.object);
+      if (hitIndex === null) return;
+      togglePartVisibility(hitIndex);
+    };
+
     const collectMeshMaterials = (obj: THREE.Object3D, into: Set<THREE.Material>) => {
       obj.traverse((child) => {
         const mesh = child as THREE.Mesh;
@@ -1947,6 +2005,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       // pointing at indices that no longer match after the splice below — exit cleanly first
       // (the sidebar already disables delete while isolated; this is a defensive backstop).
       if (isolatedPartIndexRef.current !== null) exitIsolate();
+
+      // Same reasoning for the click-to-select index: clear it if the deleted part was selected,
+      // or shift it down if a part before it in the list is being removed.
+      if (selectedPartIndexRef.current === index) {
+        selectPart(null);
+      } else if (selectedPartIndexRef.current !== null && selectedPartIndexRef.current > index) {
+        selectPart(selectedPartIndexRef.current - 1);
+      }
 
       // Multiple meshes/parts commonly reference the exact same material (e.g. every part of
       // the demo figurine shares one body material) — only dispose materials this part actually
@@ -1980,6 +2046,19 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
       notifyPartsChanged();
       requestRender();
+    };
+
+    // Purges every currently-hidden part from the scene/memory in one action — each removal goes
+    // through deletePart so isolate-guarding, material cleanup, and bounds recalc stay consistent
+    // with a single manual delete. Runs highest-index-first so earlier splices don't shift the
+    // indices still queued for removal.
+    const deleteHiddenParts = () => {
+      const hiddenIndices = batchPartsRef.current
+        .map((part, i) => (!part.object.visible ? i : -1))
+        .filter((i) => i !== -1);
+      for (let i = hiddenIndices.length - 1; i >= 0; i--) {
+        deletePart(hiddenIndices[i]);
+      }
     };
 
     // Load sample default model
@@ -2465,7 +2544,10 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       recorder.start(100);
 
-      const durationMs = 4000;
+      const speedSetting = settingsRef.current.turntableSpeed || 'normal';
+      const durationMs = speedSetting === 'slow' ? 8000 : speedSetting === 'fast' ? 2000 : 4000;
+      const dirSign = (settingsRef.current.turntableDirection || 'cw') === 'ccw' ? -1 : 1;
+      const useEasing = !!settingsRef.current.videoEasing;
       const cam = activeCameraRef.current;
       const target = controlsRef.current?.target || new THREE.Vector3();
       const relX0 = cam.position.x - target.x;
@@ -2480,7 +2562,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           if (!rendererRef.current || !sceneRef.current) return;
           const elapsed = now - startTime;
           const progress = Math.min(elapsed / durationMs, 1.0);
-          const angle = initialAngle + progress * Math.PI * 2;
+          const eased = useEasing
+            ? progress < 0.5
+              ? 4 * progress * progress * progress
+              : 1 - Math.pow(-2 * progress + 2, 3) / 2
+            : progress;
+          const angle = initialAngle + dirSign * (eased * Math.PI * 2);
 
           cam.position.x = target.x + radius * Math.sin(angle);
           cam.position.z = target.z + radius * Math.cos(angle);
@@ -2531,8 +2618,19 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       updateDimension,
       togglePartVisibility,
       deletePart,
+      deleteHiddenParts,
+      selectPart,
+      toggleSelectedOrHoveredVisibility,
       toggleIsolateHoveredPart,
     }));
+
+    // Sync external selectedPartIndex (e.g. a click on the Loaded Meshes list) into the
+    // internal ref/BoxHelper state that drives the viewport highlight.
+    useEffect(() => {
+      if (selectedPartIndex !== undefined && selectedPartIndex !== selectedPartIndexRef.current) {
+        selectPart(selectedPartIndex);
+      }
+    }, [selectedPartIndex]);
 
     // Initialize Three.js scene
     useEffect(() => {
@@ -2600,13 +2698,48 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const viewHelper = new ViewHelper(activeCamera, renderer.domElement);
       viewHelperRef.current = viewHelper;
 
+      // Click-to-select outline — a plain BoxHelper re-fit to the clicked part each time
+      // selectPart runs; hidden until something is actually selected.
+      const selectionHelper = new THREE.BoxHelper(new THREE.Mesh(), 0x38bdf8);
+      selectionHelper.visible = false;
+      scene.add(selectionHelper);
+      selectionHelperRef.current = selectionHelper;
+
       const handlePointerDown = (event: PointerEvent) => {
+        pointerDownPosRef.current = { x: event.clientX, y: event.clientY };
         if (viewHelperRef.current && !isFullscreenRef.current) {
           viewHelperRef.current.handleClick(event);
           requestRender();
         }
       };
       canvas.addEventListener('pointerdown', handlePointerDown);
+
+      // Click-to-select: a pointerup within a small radius of the matching pointerdown counts as
+      // a click (not a drag-orbit release); it raycasts against the loaded model and selects
+      // whichever tracked part owns the hit mesh, toggling off on a second click of the same part.
+      const handlePointerUp = (event: PointerEvent) => {
+        const dx = Math.abs(event.clientX - pointerDownPosRef.current.x);
+        const dy = Math.abs(event.clientY - pointerDownPosRef.current.y);
+        if (dx > 6 || dy > 6) return;
+        if (!activeCameraRef.current || !currentModelRef.current) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const ndc = {
+          x: ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          y: -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        };
+        isolateRaycasterRef.current.setFromCamera(ndc as THREE.Vector2, activeCameraRef.current);
+        const hits = isolateRaycasterRef.current.intersectObjects(currentModelRef.current.children, true);
+        const hit = hits.find((h) => h.object.visible);
+
+        if (hit) {
+          const matchedIdx = getPartIndexFromObject(hit.object);
+          selectPart(matchedIdx !== null && selectedPartIndexRef.current !== matchedIdx ? matchedIdx : null);
+        } else {
+          selectPart(null);
+        }
+      };
+      canvas.addEventListener('pointerup', handlePointerUp);
 
       const handlePointerMove = (event: PointerEvent) => {
         const rect = canvas.getBoundingClientRect();
@@ -2751,7 +2884,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         const cameraMoved = controls.update();
 
         if (isTurntableActiveRef.current && activeCameraRef.current && controlsRef.current) {
-          const speed = 0.008;
+          const speedSettingLive = settingsRef.current.turntableSpeed || 'normal';
+          const speedMultLive =
+            speedSettingLive === 'slow' ? 0.5 : speedSettingLive === 'fast' ? 2.0 : 1.0;
+          const dirSignLive = (settingsRef.current.turntableDirection || 'cw') === 'ccw' ? -1 : 1;
+          const speed = 0.008 * speedMultLive * dirSignLive;
           const cam = activeCameraRef.current;
           const target = controlsRef.current.target;
           // Rotate relative to the orbit target, not world origin — recenterView/snapView can
@@ -2791,6 +2928,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         cancelAnimationFrame(animationFrameId);
         resizeObserver.disconnect();
         canvas.removeEventListener('pointerdown', handlePointerDown);
+        canvas.removeEventListener('pointerup', handlePointerUp);
         canvas.removeEventListener('pointermove', handlePointerMove);
         cleanupScene();
         composerRef.current?.dispose();
@@ -3355,6 +3493,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                   {(['x', 'y', 'z'] as const).map((axis) => {
                     const label = axis === 'x' ? 'Left / Right' : axis === 'y' ? 'Top / Bottom' : 'Front / Back';
                     const c = settings.clipping[axis];
+                    // Offset is stored as % of the model's own bounding-box extent on this axis
+                    // (scale-independent — stays correctly placed whether the model is 1" or
+                    // 100" across), with offsetInches kept alongside purely for display.
+                    const axisSizeInches = axis === 'x' ? dimensions.widthInches : axis === 'y' ? dimensions.heightInches : dimensions.depthInches;
+                    const halfInches = Math.max((axisSizeInches || 1) * 0.5, 0.001);
+                    const pct = c.offsetPercent ?? 0;
+                    const curInches = (pct / 100) * halfInches;
                     return (
                       <div key={axis} className="flex flex-col gap-1">
                         <label className="flex items-center justify-between cursor-pointer">
@@ -3371,36 +3516,70 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                           />
                         </label>
                         {c.enabled && (
-                          <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-600">
-                            <input
-                              type="range"
-                              min="-10"
-                              max="10"
-                              step="0.05"
-                              value={c.offsetInches}
-                              onChange={(e) =>
-                                onUpdateSettings({
-                                  clipping: {
-                                    ...settings.clipping,
-                                    [axis]: { ...c, offsetInches: Number(e.target.value) },
-                                  },
-                                })
-                              }
-                              className="flex-1 accent-sky-500 cursor-pointer"
-                            />
-                            <button
-                              onClick={() =>
-                                onUpdateSettings({
-                                  clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
-                                })
-                              }
-                              className={`text-xs font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
-                                c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
-                              }`}
-                              title="Flip which side is cut away"
-                            >
-                              Flip
-                            </button>
+                          <div className="flex flex-col gap-1 pl-2 border-l-2 border-slate-600">
+                            <div className="flex items-center justify-between text-[10px] text-slate-400">
+                              <span className="font-mono">
+                                {pct === 0 ? (
+                                  <span className="text-emerald-400 font-bold">0% (Center)</span>
+                                ) : (
+                                  <span className="text-sky-300">
+                                    {pct > 0 ? `+${pct}%` : `${pct}%`} ({curInches >= 0 ? `+${curInches.toFixed(2)}` : curInches.toFixed(2)}")
+                                  </span>
+                                )}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({
+                                    clipping: { ...settings.clipping, [axis]: { ...c, offsetPercent: 0, offsetInches: 0 } },
+                                  })
+                                }
+                                className="text-[10px] text-sky-400 hover:text-sky-300 hover:underline cursor-pointer"
+                                title="Reset plane to exact model center (0%)"
+                              >
+                                Center
+                              </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="range"
+                                min="-100"
+                                max="100"
+                                step="1"
+                                value={pct}
+                                onChange={(e) => {
+                                  let val = Number(e.target.value);
+                                  if (Math.abs(val) <= 3) val = 0; // magnetic snap to center
+                                  const inchVal = Number(((val / 100) * halfInches).toFixed(3));
+                                  onUpdateSettings({
+                                    clipping: {
+                                      ...settings.clipping,
+                                      [axis]: { ...c, offsetPercent: val, offsetInches: inchVal },
+                                    },
+                                  });
+                                }}
+                                onDoubleClick={() =>
+                                  onUpdateSettings({
+                                    clipping: { ...settings.clipping, [axis]: { ...c, offsetPercent: 0, offsetInches: 0 } },
+                                  })
+                                }
+                                className="flex-1 accent-sky-500 cursor-pointer"
+                                title="Drag -100% to +100% of the model's bounding box. Double-click to snap to center."
+                              />
+                              <button
+                                onClick={() =>
+                                  onUpdateSettings({
+                                    clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
+                                  })
+                                }
+                                className={`text-xs font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
+                                  c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
+                                }`}
+                                title="Flip which side is cut away"
+                              >
+                                Flip
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>

@@ -32,7 +32,10 @@ export type ClipAxis = 'x' | 'y' | 'z';
 
 export interface ClippingPlaneSetting {
   enabled: boolean;
-  // Position offset from origin, in inches, along the axis
+  // Position offset as a percentage of the model's bounding box axis (-100% to +100%, where 0%
+  // is the center) — scale-independent, so the plane stays correctly placed across differently
+  // sized models. offsetInches is kept alongside it for display/legacy reference only.
+  offsetPercent: number;
   offsetInches: number;
   // Which side of the plane gets cut away
   flip: boolean;
@@ -122,6 +125,11 @@ export interface ViewerSettings {
 
   // Exploded view (batch-loaded parts only)
   explodeAmount: number; // 0-1
+
+  // Turntable settings
+  turntableDirection?: 'cw' | 'ccw';
+  turntableSpeed?: 'slow' | 'normal' | 'fast';
+  videoEasing?: boolean;
 }
 
 export interface DriveFileItem {

@@ -60,6 +60,9 @@ interface SidebarProps {
   parts: LoadedPart[];
   onTogglePartVisibility: (index: number) => void;
   onDeletePart: (index: number) => void;
+  onDeleteHiddenParts?: () => void;
+  selectedPartIndex?: number | null;
+  onSelectPart?: (index: number | null) => void;
   // Isolate mode (hover a part, press I) is exclusively-managed by a snapshot/restore in
   // ThreeViewport — editing visibility here mid-isolate would conflict with that, so the whole
   // Loaded Meshes list goes read-only (but still visible) while it's active.
@@ -250,6 +253,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   parts,
   onTogglePartVisibility,
   onDeletePart,
+  onDeleteHiddenParts,
+  selectedPartIndex,
+  onSelectPart,
   isIsolated,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -402,7 +408,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v1.00
+                  v1.01
                 </span>
               </span>
             </div>
@@ -501,6 +507,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 isLight={isLight}
                 headerExtra={
                   <div className="flex items-center gap-2">
+                    {onDeleteHiddenParts && !isIsolated && parts.some((p) => !p.visible) && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteHiddenParts();
+                        }}
+                        title="Permanently remove all currently hidden meshes from scene and memory"
+                        className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 cursor-pointer whitespace-nowrap px-1.5 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 transition-colors"
+                      >
+                        Delete Hidden
+                      </button>
+                    )}
                     <button
                       onClick={handleShowAllParts}
                       disabled={isIsolated}
@@ -525,34 +543,52 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     Isolated — press <b>I</b> to exit before changing visibility or deleting parts.
                   </div>
                 )}
-                {parts.map((part, i) => (
-                  <div key={`${part.name}-${i}`} className="flex items-center justify-between gap-2">
-                    <label
-                      className={`flex items-center gap-2 min-w-0 ${
-                        isIsolated ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+                {parts.map((part, i) => {
+                  const isSelected = selectedPartIndex === i;
+                  return (
+                    <div
+                      key={`${part.name}-${i}`}
+                      onClick={() => !isIsolated && onSelectPart?.(isSelected ? null : i)}
+                      className={`flex items-center justify-between gap-2 p-1 -mx-1 rounded-md transition-colors ${
+                        isIsolated ? '' : 'cursor-pointer'
+                      } ${
+                        isSelected
+                          ? 'bg-sky-500/20 border border-sky-500/50'
+                          : 'border border-transparent hover:bg-slate-800/40'
                       }`}
+                      title={isIsolated ? undefined : 'Click to select in 3D view'}
                     >
-                      <input
-                        type="checkbox"
-                        checked={part.visible}
+                      <label
+                        className={`flex items-center gap-2 min-w-0 flex-1 ${
+                          isIsolated ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+                        }`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={part.visible}
+                          disabled={isIsolated}
+                          onChange={() => onTogglePartVisibility(i)}
+                          className="accent-sky-500 w-4 h-4 shrink-0 disabled:cursor-not-allowed cursor-pointer"
+                        />
+                        <span className={`truncate ${isSelected ? 'text-sky-300 font-semibold' : ''}`} title={part.name}>
+                          {part.name}
+                        </span>
+                      </label>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeletePart(i);
+                        }}
                         disabled={isIsolated}
-                        onChange={() => onTogglePartVisibility(i)}
-                        className="accent-sky-500 w-4 h-4 shrink-0 disabled:cursor-not-allowed cursor-pointer"
-                      />
-                      <span className="truncate" title={part.name}>
-                        {part.name}
-                      </span>
-                    </label>
-                    <button
-                      onClick={() => onDeletePart(i)}
-                      disabled={isIsolated}
-                      title={isIsolated ? 'Exit isolate mode (I) to delete parts' : 'Remove this part from the scene and free its memory'}
-                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
+                        title={isIsolated ? 'Exit isolate mode (I) to delete parts' : 'Remove this part from the scene and free its memory'}
+                        className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
               </AccordionSection>
             </div>
           )}
@@ -663,6 +699,52 @@ export const Sidebar: React.FC<SidebarProps> = ({
               >
                 3/4 Front-R (8)
               </button>
+
+              {/* Turntable Direction & Speed */}
+              <div
+                className={`col-span-2 flex items-center justify-between gap-1.5 p-1.5 rounded-md border text-[11px] ${
+                  isLight ? 'bg-slate-100 border-slate-300' : 'bg-slate-800/60 border-slate-700/60'
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 font-medium">Dir:</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateSettings({
+                        turntableDirection: (settings.turntableDirection || 'cw') === 'cw' ? 'ccw' : 'cw',
+                      })
+                    }
+                    className={`px-2 py-0.5 rounded font-semibold text-[10px] cursor-pointer transition-colors ${
+                      isLight
+                        ? 'bg-white hover:bg-slate-200 border border-slate-300 text-slate-700'
+                        : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
+                    }`}
+                    title="Toggle Rotation Direction (CW: Clockwise, CCW: Counter-Clockwise)"
+                  >
+                    {(settings.turntableDirection || 'cw').toUpperCase()}
+                  </button>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400 font-medium">Speed:</span>
+                  {(['slow', 'normal', 'fast'] as const).map((spd) => (
+                    <button
+                      key={spd}
+                      type="button"
+                      onClick={() => onUpdateSettings({ turntableSpeed: spd })}
+                      className={`px-1.5 py-0.5 rounded capitalize text-[10px] font-medium cursor-pointer transition-colors ${
+                        (settings.turntableSpeed || 'normal') === spd
+                          ? 'bg-sky-600 text-white font-semibold'
+                          : isLight
+                          ? 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+                          : 'bg-slate-700/60 hover:bg-slate-700 text-slate-300'
+                      }`}
+                    >
+                      {spd}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -789,6 +871,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 )}
               </div>
             </div>
+
+            {/* Video Easing Checkbox */}
+            <label className="flex items-center justify-between gap-2 px-1 pt-2 border-t border-slate-700/50 text-xs text-slate-300 cursor-pointer select-none">
+              <span className="text-[11px] font-medium text-slate-400">Video Easing (Smooth start/stop)</span>
+              <input
+                type="checkbox"
+                checked={!!settings.videoEasing}
+                onChange={(e) => onUpdateSettings({ videoEasing: e.target.checked })}
+                className="accent-sky-500 w-3.5 h-3.5 cursor-pointer"
+              />
+            </label>
           </div>
 
           {/* SETTINGS ACCORDION */}
