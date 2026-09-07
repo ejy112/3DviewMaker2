@@ -408,7 +408,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v1.03
+                  v1.04
                 </span>
               </span>
             </div>
@@ -589,6 +589,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                   );
                 })}
+
+                {onDeleteHiddenParts && !isIsolated && parts.some((p) => !p.visible) && (
+                  <button
+                    onClick={onDeleteHiddenParts}
+                    className="w-full mt-2 py-1.5 px-2 rounded-md bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    title="Purge all hidden items from memory and scene (zoom fitting will then frame only loaded meshes)"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete All Hidden Meshes ({parts.filter((p) => !p.visible).length})</span>
+                  </button>
+                )}
               </AccordionSection>
             </div>
           )}
@@ -1114,7 +1125,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="pt-2 pb-1 text-center">
             <img
               id="sidebar-jazwares-logo"
-              src="https://cdn.cookielaw.org/logos/fe328015-5ba0-440b-96be-399813ddce55/019ed71b-fe3a-7d09-ab6f-ebb2d6233a0f/8d2a10ff-d963-41d9-8439-7c3ebbbaa2d5/jazwares-logo-squared.png"
+              src={`${import.meta.env.BASE_URL}assets/jazwares-logo.png`}
               alt="Jazwares Logo"
               className="mx-auto max-w-[120px] h-auto object-contain opacity-45 hover:opacity-100 transition-opacity duration-300 ease-in-out"
             />
