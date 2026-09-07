@@ -47,6 +47,7 @@ class VignetteBackgroundPass extends Pass {
 import { MeshBVH } from 'three-mesh-bvh';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import {
   LoadedPart,
   MaterialKey,
@@ -2753,6 +2754,40 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     };
 
     // Turntable Video Exporter
+    // Restores the live-view resolution/state after either export path finishes (or bails out) —
+    // shared so Path A (WebCodecs) and Path B (MediaRecorder) can't drift into inconsistent
+    // cleanup as they're each edited over time.
+    const restoreLiveViewAfterExport = (origW: number, origH: number, cam: THREE.Camera) => {
+      if (!rendererRef.current) return;
+      rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      rendererRef.current.setSize(origW, origH, true);
+      if (composerRef.current) composerRef.current.setSize(origW, origH);
+      if (cameraPerspRef.current) {
+        cameraPerspRef.current.aspect = origW / origH;
+        cameraPerspRef.current.updateProjectionMatrix();
+      }
+      updateOrthoFrustum();
+      isExportingRef.current = false;
+      if (controlsRef.current) controlsRef.current.enabled = true;
+      if (settingsRef.current.isOrtho && settingsRef.current.showGrid) updateGrid();
+      updateLights(cam);
+      requestRender();
+    };
+
+    // Turntable video export, with two paths:
+    //
+    // Path A — WebCodecs VideoEncoder + mp4-muxer, used whenever format is 'mp4' and the browser
+    // supports it (all Chromium browsers — the large majority of usage). MediaRecorder's own
+    // 'video/mp4' output is unreliable: MediaRecorder.isTypeSupported('video/mp4') returns false
+    // in stock Chrome/Edge entirely (silently falling back to webm despite the button saying
+    // "Export MP4"), and even where a browser does report mp4 support, MediaRecorder-produced
+    // containers can be poorly structured (e.g. moov placement) and fail to play in stricter
+    // players. Path A sidesteps all of that by manually encoding each frame into a real,
+    // standards-compliant MP4 container itself — not dependent on what the browser's recorder
+    // happens to support.
+    //
+    // Path B — MediaRecorder, used for webm, and as the fallback for browsers without WebCodecs
+    // (Firefox, older Safari) or where Path A throws for any reason.
     const exportTurntableVideo = async (
       format: 'mp4' | 'webm',
       onComplete: (blob: Blob, fileName: string) => void,
@@ -2765,13 +2800,136 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       isExportingRef.current = true;
       if (controlsRef.current) controlsRef.current.enabled = false;
 
-      onProgress('Testing encoder...');
+      onProgress('Initializing video encoder...');
       recalculateBounds();
 
+      // Temporarily render at a higher fixed resolution for a cleaner, less compressed-looking
+      // capture than whatever the on-screen canvas size happens to be. H.264 encoders (Path A,
+      // and most MediaRecorder mp4/h264 backends too) strictly require even width/height.
+      const origW = containerRef.current?.clientWidth || canvasRef.current.width;
+      const origH = containerRef.current?.clientHeight || canvasRef.current.height;
+      const aspect = origW / origH;
+      const targetLongEdge = 1600;
+      let exportW = Math.round(aspect >= 1 ? targetLongEdge : targetLongEdge * aspect);
+      let exportH = Math.round(aspect >= 1 ? targetLongEdge / aspect : targetLongEdge);
+      if (exportW % 2 !== 0) exportW += 1;
+      if (exportH % 2 !== 0) exportH += 1;
+      rendererRef.current.setPixelRatio(1);
+      rendererRef.current.setSize(exportW, exportH, true);
+      if (composerRef.current) composerRef.current.setSize(exportW, exportH);
+      if (cameraPerspRef.current) {
+        cameraPerspRef.current.aspect = exportW / exportH;
+        cameraPerspRef.current.updateProjectionMatrix();
+      }
+      updateOrthoFrustum();
+
+      // Rotation math shared by both paths — identical to the live turntable loop and the
+      // export's own preview, just driven by a frame index (Path A) or wall-clock elapsed time
+      // (Path B) instead of requestAnimationFrame deltas.
+      const fps = 30;
+      const speedSetting = settingsRef.current.turntableSpeed || 'normal';
+      const durationMs = speedSetting === 'slow' ? 8000 : speedSetting === 'fast' ? 2000 : 4000;
+      const totalFrames = Math.round((durationMs / 1000) * fps);
+      const dirSign = (settingsRef.current.turntableDirection || 'cw') === 'ccw' ? -1 : 1;
+      const useEasing = !!settingsRef.current.videoEasing;
+      const cam = activeCameraRef.current;
+      const target = controlsRef.current?.target || new THREE.Vector3();
+      const relX0 = cam.position.x - target.x;
+      const relZ0 = cam.position.z - target.z;
+      const radius = Math.sqrt(relX0 ** 2 + relZ0 ** 2) || modelRadiusRef.current * 3.0;
+      const camY = cam.position.y;
+      const initialAngle = Math.atan2(relX0, relZ0);
+      const easeProgress = (progress: number) =>
+        useEasing
+          ? progress < 0.5
+            ? 4 * progress * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 3) / 2
+          : progress;
+      const cleanName = (loadedFileName || 'model').replace(/\.[^/.]+$/, '');
+
+      // Path A: real MP4 via WebCodecs + mp4-muxer
+      if (format === 'mp4' && typeof VideoEncoder !== 'undefined') {
+        let supportedCodec: string | null = null;
+        for (const codec of ['avc1.42001f', 'avc1.4d002a', 'avc1.64002a', 'avc1.42E01E']) {
+          try {
+            const res = await VideoEncoder.isConfigSupported({
+              codec,
+              width: exportW,
+              height: exportH,
+              bitrate: 12_000_000,
+              framerate: fps,
+            });
+            if (res?.supported) {
+              supportedCodec = codec;
+              break;
+            }
+          } catch {
+            // try the next candidate
+          }
+        }
+
+        if (supportedCodec) {
+          try {
+            onProgress('Rendering MP4: 0%...');
+            const muxer = new Muxer({
+              target: new ArrayBufferTarget(),
+              video: { codec: 'avc', width: exportW, height: exportH },
+              fastStart: 'in-memory',
+            });
+
+            let encoderError: Error | null = null;
+            const encoder = new VideoEncoder({
+              output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+              error: (err) => {
+                console.error('VideoEncoder error', err);
+                encoderError = err;
+              },
+            });
+            encoder.configure({ codec: supportedCodec, width: exportW, height: exportH, bitrate: 12_000_000, framerate: fps });
+
+            for (let i = 0; i < totalFrames; i++) {
+              if (encoderError) throw encoderError;
+              const progress = i / totalFrames;
+              const angle = initialAngle + dirSign * (easeProgress(progress) * Math.PI * 2);
+
+              cam.position.x = target.x + radius * Math.sin(angle);
+              cam.position.z = target.z + radius * Math.cos(angle);
+              cam.position.y = camY;
+              cam.lookAt(target);
+
+              updateLights(cam);
+              renderFrame(cam, false);
+
+              const timestampMicros = Math.round(i * (1_000_000 / fps));
+              const frame = new VideoFrame(canvasRef.current, { timestamp: timestampMicros });
+              encoder.encode(frame, { keyFrame: i % 30 === 0 });
+              frame.close();
+
+              onProgress(`Rendering MP4: ${Math.round(progress * 100)}% (${i + 1}/${totalFrames})...`);
+              if (i % 6 === 0) await new Promise((r) => requestAnimationFrame(r));
+            }
+
+            onProgress('Finalizing MP4...');
+            await encoder.flush();
+            muxer.finalize();
+            encoder.close();
+
+            const mp4Blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+            onComplete(mp4Blob, `${cleanName}_Turnaround.mp4`);
+            restoreLiveViewAfterExport(origW, origH, cam);
+            return;
+          } catch (webCodecsErr) {
+            console.warn('WebCodecs MP4 export failed, falling back to MediaRecorder:', webCodecsErr);
+          }
+        }
+      }
+
+      // Path B: MediaRecorder fallback (webm, or mp4 on browsers without usable WebCodecs)
+      onProgress('Testing encoder...');
       let selectedMimeType = getSupportedVideoMimeType(format);
+      if (!selectedMimeType) selectedMimeType = getSupportedVideoMimeType('webm');
       if (!selectedMimeType) {
-        isExportingRef.current = false;
-        if (controlsRef.current) controlsRef.current.enabled = true;
+        restoreLiveViewAfterExport(origW, origH, cam);
         throw new Error('Video recording is not supported in this browser.');
       }
 
@@ -2781,23 +2939,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
 
       onProgress('Recording 360° turntable...');
-
-      // Temporarily render at a higher fixed resolution for a cleaner, less compressed-looking
-      // capture than whatever the on-screen canvas size happens to be.
-      const origW = containerRef.current?.clientWidth || canvasRef.current.width;
-      const origH = containerRef.current?.clientHeight || canvasRef.current.height;
-      const aspect = origW / origH;
-      const targetLongEdge = 1600;
-      const exportW = Math.round(aspect >= 1 ? targetLongEdge : targetLongEdge * aspect);
-      const exportH = Math.round(aspect >= 1 ? targetLongEdge / aspect : targetLongEdge);
-      rendererRef.current.setPixelRatio(1);
-      rendererRef.current.setSize(exportW, exportH, true);
-      if (composerRef.current) composerRef.current.setSize(exportW, exportH);
-      if (cameraPerspRef.current) {
-        cameraPerspRef.current.aspect = exportW / exportH;
-        cameraPerspRef.current.updateProjectionMatrix();
-      }
-      updateOrthoFrustum();
 
       const stream = canvasRef.current.captureStream(30);
       let recorder: MediaRecorder;
@@ -2825,9 +2966,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
             }
             const isMp4 = selectedMimeType.includes('mp4');
             const ext = isMp4 ? 'mp4' : 'webm';
-            const cleanName = (loadedFileName || 'model').replace(/\.[^/.]+$/, '');
-            const outName = `${cleanName}_Turnaround.${ext}`;
-            onComplete(blob, outName);
+            onComplete(blob, `${cleanName}_Turnaround.${ext}`);
             resolve();
           } catch (err) {
             reject(err);
@@ -2838,30 +2977,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       recorder.start(100);
 
-      const speedSetting = settingsRef.current.turntableSpeed || 'normal';
-      const durationMs = speedSetting === 'slow' ? 8000 : speedSetting === 'fast' ? 2000 : 4000;
-      const dirSign = (settingsRef.current.turntableDirection || 'cw') === 'ccw' ? -1 : 1;
-      const useEasing = !!settingsRef.current.videoEasing;
-      const cam = activeCameraRef.current;
-      const target = controlsRef.current?.target || new THREE.Vector3();
-      const relX0 = cam.position.x - target.x;
-      const relZ0 = cam.position.z - target.z;
-      const radius = Math.sqrt(relX0 ** 2 + relZ0 ** 2) || modelRadiusRef.current * 3.0;
-      const camY = cam.position.y;
-      const initialAngle = Math.atan2(relX0, relZ0);
       const startTime = performance.now();
-
       await new Promise<void>((resolve) => {
         const renderStep = (now: number) => {
           if (!rendererRef.current || !sceneRef.current) return;
           const elapsed = now - startTime;
           const progress = Math.min(elapsed / durationMs, 1.0);
-          const eased = useEasing
-            ? progress < 0.5
-              ? 4 * progress * progress * progress
-              : 1 - Math.pow(-2 * progress + 2, 3) / 2
-            : progress;
-          const angle = initialAngle + dirSign * (eased * Math.PI * 2);
+          const angle = initialAngle + dirSign * (easeProgress(progress) * Math.PI * 2);
 
           cam.position.x = target.x + radius * Math.sin(angle);
           cam.position.z = target.z + radius * Math.cos(angle);
@@ -2884,21 +3006,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       if (recorder.state !== 'inactive') recorder.stop();
       await recordPromise;
 
-      // Restore the live-view resolution
-      rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-      rendererRef.current.setSize(origW, origH, true);
-      if (composerRef.current) composerRef.current.setSize(origW, origH);
-      if (cameraPerspRef.current) {
-        cameraPerspRef.current.aspect = origW / origH;
-        cameraPerspRef.current.updateProjectionMatrix();
-      }
-      updateOrthoFrustum();
-
-      isExportingRef.current = false;
-      if (controlsRef.current) controlsRef.current.enabled = true;
-      if (settingsRef.current.isOrtho && settingsRef.current.showGrid) updateGrid();
-      updateLights(cam);
-      requestRender();
+      restoreLiveViewAfterExport(origW, origH, cam);
     };
 
     useImperativeHandle(ref, () => ({
