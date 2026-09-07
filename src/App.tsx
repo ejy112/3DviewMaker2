@@ -59,6 +59,8 @@ export default function App() {
     sketchShadowColorHex: '#334155',
 
     environmentPreset: 'studio',
+    hdrRotationDeg: 0,
+    envIntensity: 100,
 
     clipping: {
       x: { enabled: false, offsetPercent: 0, offsetInches: 0, flip: false },

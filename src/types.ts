@@ -24,7 +24,16 @@ export type ResolutionOption = 1 | 2 | 3 | 4 | 5;
 
 export type VideoFormat = 'mp4' | 'webm';
 
-export type EnvironmentPreset = 'studio' | 'outdoor' | 'interior' | 'sunset';
+// The 4 base categories are the procedural PMREM fallback's own presets; a real HDRI selection
+// from the manifest (see HdriManifestItem) can set this to any of the manifest's own ids too.
+export type EnvironmentPreset = 'studio' | 'outdoor' | 'interior' | 'sunset' | string;
+
+export interface HdriManifestItem {
+  id: string;
+  name: string;
+  file: string;
+  category?: 'Studio' | 'Outdoor' | 'Interior' | string;
+}
 
 export type AntialiasMode = 'none' | 'fxaa' | 'smaa';
 
@@ -108,6 +117,16 @@ export interface ViewerSettings {
 
   // Environment / lighting
   environmentPreset: EnvironmentPreset;
+  // Rotates the HDR/PMREM environment map itself (independent of the key/fill directional
+  // lights) — 0-360.
+  hdrRotationDeg: number;
+  // Environment reflection/IBL strength, 0-300% (100 = neutral). Drives scene.environmentIntensity
+  // only — deliberately NOT the ambient light (that stays owned by contrastPercent) or per-material
+  // envMapIntensity (that would double-apply multiplicatively with scene.environmentIntensity).
+  envIntensity: number;
+  // Set once the user has uploaded their own HDR/EXR/panorama — when present it takes priority
+  // over environmentPreset for which environment map is actually shown.
+  customHdriFileName?: string;
 
   // Clipping planes
   clipping: ClippingSettings;

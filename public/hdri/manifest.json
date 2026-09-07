@@ -1,0 +1,13 @@
+{
+  "hdris": [
+    { "id": "studio", "name": "Studio Neutral (Key & Fill)", "file": "hdri/studio-a.hdr", "category": "Studio" },
+    { "id": "studio_contrast", "name": "Studio Contrast (Rim Kickers)", "file": "hdri/studio-b.hdr", "category": "Studio" },
+    { "id": "warm_studio", "name": "Warm Studio (Amber Glow)", "file": "hdri/warm-studio.hdr", "category": "Studio" },
+    { "id": "dark_studio", "name": "Dark Workshop (Moody Spot)", "file": "hdri/dark-studio.hdr", "category": "Studio" },
+    { "id": "wood_studio", "name": "Wood Lounge (Warm Interior)", "file": "hdri/wood-studio.hdr", "category": "Studio" },
+    { "id": "outdoor", "name": "Daylight (Pure Sun & Sky)", "file": "hdri/day.hdr", "category": "Outdoor" },
+    { "id": "sunset", "name": "Golden Hour Sunset", "file": "hdri/golden.hdr", "category": "Outdoor" },
+    { "id": "clearing_mist", "name": "Clearing Mist (Overcast Soft)", "file": "hdri/clearing-mist.hdr", "category": "Outdoor" },
+    { "id": "interior", "name": "Interior Grand Hall", "file": "hdri/interior.hdr", "category": "Interior" }
+  ]
+}
