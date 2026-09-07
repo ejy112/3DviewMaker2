@@ -158,6 +158,10 @@ export default function App() {
     viewportRef.current?.loadModelFromFile(file);
   };
 
+  const handleDriveModelsSelected = (files: File[]) => {
+    viewportRef.current?.loadModelsFromFiles(files);
+  };
+
   // Turnaround Sheet Image Export
   const handleExportTurns = (destination: 'download' | 'drive') => {
     if (!viewportRef.current || !hasModel) return;
@@ -427,6 +431,7 @@ export default function App() {
         mode={driveModalMode}
         saveOptions={driveSaveOptions}
         onSelectModelFile={handleDriveModelSelected}
+        onSelectModelFiles={handleDriveModelsSelected}
         theme={theme}
       />
     </div>

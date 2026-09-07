@@ -389,6 +389,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const unscaledModelSizeRef = useRef<THREE.Vector3>(new THREE.Vector3(1, 1, 1));
     const unscaledCenterRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
     const modelRadiusRef = useRef<number>(1);
+    // Current world-space center of the bounding box recalculateBounds() last computed — distinct
+    // from unscaledCenterRef (the unscaled model's own local-space center, used when reapplying
+    // scale/rotation). Deleting a part shifts the assembly's true center away from the origin the
+    // model was originally loaded centered on, so Fit to View / preset views must orbit around
+    // this, not a hardcoded (0,0,0), or the remaining geometry ends up off-frame.
+    const modelCenterRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
     const needsRenderRef = useRef<boolean>(true);
 
     const isExportingRef = useRef<boolean>(false);
@@ -517,6 +523,24 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const sphere = new THREE.Sphere();
       box.getBoundingSphere(sphere);
       modelRadiusRef.current = sphere.radius || 1;
+      box.getCenter(modelCenterRef.current);
+    };
+
+    // Distance from modelCenterRef at which a sphere of modelRadiusRef fits inside the current
+    // camera's view, with a little padding to match the ~3% margin updateOrthoFrustum uses. For
+    // a perspective camera this MUST scale with the vertical FOV (which tracks focal length via
+    // setFocalLength) — a fixed radius-based distance looks zoomed way out at wide focal lengths
+    // (wide FOV) and cropped at long ones (narrow FOV), since the same distance subtends a very
+    // different angular size depending on FOV. Orthographic framing doesn't depend on distance
+    // at all (updateOrthoFrustum sets the frustum directly), so any reasonable clearance works.
+    const computeFitDistance = (cam: THREE.Camera): number => {
+      const radius = modelRadiusRef.current || 1;
+      const persp = cam as THREE.PerspectiveCamera;
+      if (persp.isPerspectiveCamera) {
+        const halfFovRad = THREE.MathUtils.degToRad(persp.fov) / 2;
+        return (radius * 1.03) / Math.sin(halfFovRad);
+      }
+      return radius * 3.0;
     };
 
     const updateLights = (cam: THREE.Camera) => {
@@ -1182,12 +1206,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       if (!currentModelRef.current || !activeCameraRef.current || !controlsRef.current) return;
       recalculateBounds();
       const cam = activeCameraRef.current;
+      const center = modelCenterRef.current;
       const dir = new THREE.Vector3().subVectors(cam.position, controlsRef.current.target).normalize();
       if (dir.lengthSq() === 0) dir.set(0, 0, 1);
 
-      controlsRef.current.target.set(0, 0, 0);
-      cam.position.copy(dir.multiplyScalar(modelRadiusRef.current * 3.0));
-      cam.lookAt(0, 0, 0);
+      controlsRef.current.target.copy(center);
+      cam.position.copy(center).addScaledVector(dir, computeFitDistance(cam));
+      cam.lookAt(center);
 
       if (cameraOrthoRef.current) {
         cameraOrthoRef.current.zoom = 1;
@@ -1214,38 +1239,41 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const snapView = (dir: SnapDirection) => {
       if (!currentModelRef.current || !activeCameraRef.current || !controlsRef.current) return;
       recalculateBounds();
-      const dist = modelRadiusRef.current * 3.0;
       const cam = activeCameraRef.current;
-      controlsRef.current.target.set(0, 0, 0);
+      const center = modelCenterRef.current;
+      const dist = computeFitDistance(cam);
+      controlsRef.current.target.copy(center);
 
+      const offset = new THREE.Vector3();
       switch (dir) {
         case 'front':
-          cam.position.set(0, 0, dist);
+          offset.set(0, 0, dist);
           break;
         case 'back':
-          cam.position.set(0, 0, -dist);
+          offset.set(0, 0, -dist);
           break;
         case 'left':
-          cam.position.set(dist, 0, 0);
+          offset.set(dist, 0, 0);
           break;
         case 'right':
-          cam.position.set(-dist, 0, 0);
+          offset.set(-dist, 0, 0);
           break;
         case 'top':
-          cam.position.set(0, dist, 0.0001);
+          offset.set(0, dist, 0.0001);
           break;
         case 'bottom':
-          cam.position.set(0, -dist, 0.0001);
+          offset.set(0, -dist, 0.0001);
           break;
         case 'isofl':
-          cam.position.set(dist * 0.707, dist * 0.5, dist * 0.707);
+          offset.set(dist * 0.707, dist * 0.5, dist * 0.707);
           break;
         case 'isofr':
-          cam.position.set(-dist * 0.707, dist * 0.5, dist * 0.707);
+          offset.set(-dist * 0.707, dist * 0.5, dist * 0.707);
           break;
       }
+      cam.position.copy(center).add(offset);
 
-      cam.lookAt(0, 0, 0);
+      cam.lookAt(center);
       if (cameraOrthoRef.current) cameraOrthoRef.current.zoom = 1;
       if (settingsRef.current.isOrtho) updateOrthoFrustum();
 
@@ -2333,10 +2361,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       const durationMs = 4000;
       const cam = activeCameraRef.current;
-      const radius =
-        Math.sqrt(cam.position.x ** 2 + cam.position.z ** 2) || modelRadiusRef.current * 3.0;
+      const target = controlsRef.current?.target || new THREE.Vector3();
+      const relX0 = cam.position.x - target.x;
+      const relZ0 = cam.position.z - target.z;
+      const radius = Math.sqrt(relX0 ** 2 + relZ0 ** 2) || modelRadiusRef.current * 3.0;
       const camY = cam.position.y;
-      const initialAngle = Math.atan2(cam.position.x, cam.position.z);
+      const initialAngle = Math.atan2(relX0, relZ0);
       const startTime = performance.now();
 
       await new Promise<void>((resolve) => {
@@ -2346,8 +2376,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           const progress = Math.min(elapsed / durationMs, 1.0);
           const angle = initialAngle + progress * Math.PI * 2;
 
-          cam.position.x = radius * Math.sin(angle);
-          cam.position.z = radius * Math.cos(angle);
+          cam.position.x = target.x + radius * Math.sin(angle);
+          cam.position.z = target.z + radius * Math.cos(angle);
           cam.position.y = camY;
           if (controlsRef.current) cam.lookAt(controlsRef.current.target);
 
@@ -2607,11 +2637,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         if (isTurntableActiveRef.current && activeCameraRef.current && controlsRef.current) {
           const speed = 0.008;
           const cam = activeCameraRef.current;
-          const x = cam.position.x;
-          const z = cam.position.z;
-          cam.position.x = x * Math.cos(speed) - z * Math.sin(speed);
-          cam.position.z = x * Math.sin(speed) + z * Math.cos(speed);
-          cam.lookAt(controlsRef.current.target);
+          const target = controlsRef.current.target;
+          // Rotate relative to the orbit target, not world origin — recenterView/snapView can
+          // now put that target away from (0,0,0) (see modelCenterRef), and orbiting around the
+          // origin instead of the actual model center would send the camera drifting off-model.
+          // The +speed sign here (sin(θ+speed) via a(+),b(+) angle-sum expansion) is chosen to
+          // match exportTurntableVideo's `angle = initialAngle + progress*2π` convention — the
+          // two used to rotate in OPPOSITE directions (the recorded video spun backwards from
+          // what the live preview showed) because this loop's old x*cos-z*sin form is actually
+          // sin(θ-speed), decreasing θ while the export increases it.
+          const relX = cam.position.x - target.x;
+          const relZ = cam.position.z - target.z;
+          cam.position.x = target.x + (relX * Math.cos(speed) + relZ * Math.sin(speed));
+          cam.position.z = target.z + (-relX * Math.sin(speed) + relZ * Math.cos(speed));
+          cam.lookAt(target);
 
           // The grid backdrop re-orients every render (see renderFrame/updateGridOrientation)
           // by just copying position/quaternion — no geometry rebuild — so billboarding it

@@ -45,6 +45,8 @@ interface DriveModalProps {
   mode: 'import' | 'save';
   saveOptions?: DriveSaveOptions | null;
   onSelectModelFile?: (file: File) => void;
+  // Loads 2+ files as one multi-part assembly, same as dropping multiple local files at once.
+  onSelectModelFiles?: (files: File[]) => void;
   theme: ThemeMode;
 }
 
@@ -54,6 +56,7 @@ export const DriveModal: React.FC<DriveModalProps> = ({
   mode,
   saveOptions,
   onSelectModelFile,
+  onSelectModelFiles,
   theme,
 }) => {
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -76,6 +79,14 @@ export const DriveModal: React.FC<DriveModalProps> = ({
   const [uploadSuccessMsg, setUploadSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Multi-select for "load as assembly" — a Map (not just a Set of ids) so a file picked in one
+  // folder is still fully identified (name/mimeType) after navigating to another folder, letting
+  // selection span multiple folders in one batch.
+  const [selectedFiles, setSelectedFiles] = useState<Map<string, DriveItem>>(
+    new Map<string, DriveItem>()
+  );
+  const [isBatchDownloading, setIsBatchDownloading] = useState(false);
+
   // New Folder Creation
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -86,6 +97,7 @@ export const DriveModal: React.FC<DriveModalProps> = ({
     if (isOpen) {
       setErrorMsg(null);
       setUploadSuccessMsg(null);
+      setSelectedFiles(new Map());
       if (isAuthenticated) {
         loadCurrentLocation();
       }
@@ -217,6 +229,43 @@ export const DriveModal: React.FC<DriveModalProps> = ({
       setErrorMsg(err.message || 'Failed to download 3D file from Google Drive');
     } finally {
       setIsDownloadingId(null);
+    }
+  };
+
+  const toggleFileSelected = (item: DriveItem) => {
+    setSelectedFiles((prev) => {
+      const next = new Map(prev);
+      if (next.has(item.id)) next.delete(item.id);
+      else next.set(item.id, item);
+      return next;
+    });
+  };
+
+  // Download every selected file and load them together as one multi-part assembly, same as
+  // dropping multiple local files at once.
+  const handleLoadSelectedAsAssembly = async () => {
+    if (selectedFiles.size === 0) return;
+    setIsBatchDownloading(true);
+    setErrorMsg(null);
+    try {
+      const entries: DriveItem[] = [];
+      selectedFiles.forEach((item) => entries.push(item));
+      const files = await Promise.all(
+        entries.map(async (item) => {
+          const blob = await downloadDriveFile(item.id);
+          return new File([blob], item.name, {
+            type: item.mimeType || 'application/octet-stream',
+          });
+        })
+      );
+      if (onSelectModelFiles) {
+        onSelectModelFiles(files);
+      }
+      onClose();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to download the selected files from Google Drive');
+    } finally {
+      setIsBatchDownloading(false);
     }
   };
 
@@ -653,17 +702,31 @@ export const DriveModal: React.FC<DriveModalProps> = ({
                         <div className="space-y-1">
                           {fileItems.map((file) => {
                             const isDownloading = isDownloadingId === file.id;
+                            const isSelected = selectedFiles.has(file.id);
                             const ext = file.name.split('.').pop()?.toUpperCase() || '3D';
                             return (
                               <div
                                 key={file.id}
                                 className={`flex items-center justify-between p-2.5 rounded-lg border transition-all ${
-                                  isLight
+                                  isSelected
+                                    ? isLight
+                                      ? 'bg-blue-50 border-blue-300'
+                                      : 'bg-blue-950/40 border-blue-500/60'
+                                    : isLight
                                     ? 'bg-white hover:bg-slate-50 border-slate-200'
                                     : 'bg-slate-800/40 hover:bg-slate-800/80 border-slate-700/50'
                                 }`}
                               >
-                                <div className="flex items-center gap-2.5 overflow-hidden">
+                                <label className="flex items-center gap-2.5 overflow-hidden cursor-pointer min-w-0">
+                                  {mode === 'import' && (
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      onChange={() => toggleFileSelected(file)}
+                                      title="Select for multi-part assembly load"
+                                      className="accent-blue-600 w-3.5 h-3.5 cursor-pointer shrink-0"
+                                    />
+                                  )}
                                   <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 font-bold shrink-0">
                                     {ext}
                                   </span>
@@ -675,14 +738,14 @@ export const DriveModal: React.FC<DriveModalProps> = ({
                                       </span>
                                     )}
                                   </div>
-                                </div>
+                                </label>
 
                                 {mode === 'import' && (
                                   <button
                                     id={`btn-open-file-${file.id}`}
                                     onClick={() => handleSelectModelFile(file)}
                                     disabled={isDownloading}
-                                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs transition-colors shrink-0 cursor-pointer disabled:opacity-50 shadow-xs"
+                                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs transition-colors shrink-0 cursor-pointer disabled:opacity-50 shadow-xs ml-2"
                                   >
                                     {isDownloading ? (
                                       <>
@@ -706,6 +769,48 @@ export const DriveModal: React.FC<DriveModalProps> = ({
                   </div>
                 )}
               </div>
+
+              {/* IMPORT MODE: Multi-select action bar — appears once 2+ files are checked.
+                  Selection is tracked by id+metadata (not just id) so it survives navigating to
+                  a different folder, letting a batch span multiple folders. */}
+              {mode === 'import' && selectedFiles.size > 0 && (
+                <div
+                  className={`p-3 border-t flex items-center justify-between gap-3 ${
+                    isLight ? 'bg-slate-50 border-slate-200' : 'bg-slate-800/80 border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 text-xs">
+                    <span className="font-semibold">
+                      {selectedFiles.size} file{selectedFiles.size > 1 ? 's' : ''} selected
+                    </span>
+                    <button
+                      onClick={() => setSelectedFiles(new Map())}
+                      disabled={isBatchDownloading}
+                      className="text-slate-400 hover:text-slate-200 underline cursor-pointer disabled:opacity-50"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <button
+                    id="btn-load-selected-drive-files"
+                    onClick={handleLoadSelectedAsAssembly}
+                    disabled={isBatchDownloading}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-all cursor-pointer shadow-md disabled:opacity-50"
+                  >
+                    {isBatchDownloading ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Downloading {selectedFiles.size}...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Load {selectedFiles.size} as Assembly</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
 
               {/* SAVE MODE: Bottom Destination & Confirm Action Panel */}
               {mode === 'save' && saveOptions && (
