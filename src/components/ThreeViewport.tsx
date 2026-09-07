@@ -326,14 +326,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const clipPlaneXRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0));
     const clipPlaneYRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
     const clipPlaneZRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0));
-    // Per-part clip planes while Exploded View is active — each part's own copy of the base
-    // planes, shifted by that part's current explosion displacement, so a clip keeps cutting
-    // through the model's resting/assembled geometry instead of through wherever empty space the
-    // part has since moved away to. Only populated/consulted while exploded; unexploded models
-    // keep using the shared clipPlaneX/Y/ZRef instances above. Cleared in cleanupScene — a plain
-    // Map holds strong references to its keys, so old parts would otherwise never be released.
-    const batchPartPlanesRef = useRef<Map<THREE.Object3D, THREE.Plane[]>>(new Map());
-    const wasExplodedClipModeRef = useRef<boolean>(false);
     // Which of the three planes are currently active, and the array handed to materials.
     // The active *count* is baked into each material's compiled shader (NUM_CLIPPING_PLANES),
     // so we only need to force a recompile when a plane is added/removed, not when an
@@ -616,7 +608,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       setThicknessProgress(null);
       batchPartsRef.current = [];
       batchGroupCenterRef.current.set(0, 0, 0);
-      batchPartPlanesRef.current.clear();
       if (selectedPartIndexRef.current !== null) selectPart(null);
       if (thicknessMaterialRef.current) {
         thicknessMaterialRef.current.uniforms.uIsReady.value = 0.0;
@@ -1322,49 +1313,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         aoPassRef.current.normalMaterial.clippingPlanes = nextClippingPlanes;
       }
 
+      // Clip planes stay fixed in world space regardless of Exploded View — the plane never
+      // shifts to track a part's explosion displacement. A part cuts wherever it currently sits
+      // relative to the (unmoving) plane: pieces that explode away from it eventually clear the
+      // cut and render whole again, and pieces exploding into it can pick up a new cut, exactly
+      // as if the plane were a fixed blade parts are moving past, not something carried along
+      // with each part.
       const clippingActive = activeClipPlanes.length > 0;
-      const isExploded = batchPartsRef.current.length > 1 && (settingsRef.current.explodeAmount || 0) > 0;
-      // A part-clipping-mode transition (entering/leaving the exploded+clipping branch below)
-      // needs the same one-time mesh reassignment countChanged triggers — otherwise un-exploding
-      // would leave every mesh still pointing at its now-stale per-part plane array forever.
-      const explodedClipModeChanged = isExploded !== wasExplodedClipModeRef.current;
-      wasExplodedClipModeRef.current = isExploded;
-
-      if (isExploded && clippingActive && currentModelRef.current) {
-        // Per-part clipping: each part's plane equation is the base plane shifted by that part's
-        // own world-space explosion displacement, so the cut stays fixed to the model's
-        // resting/assembled geometry as parts move away from it, rather than staying fixed in
-        // world space and slicing through wherever the part used to be.
-        const rot = currentModelRef.current.rotation;
-        const scale = dimensionsRef.current.scaleFactor || 1;
-        batchPartsRef.current.forEach((part) => {
-          const worldDelta = part.object.position.clone().sub(part.basePosition).applyEuler(rot).multiplyScalar(scale);
-
-          let partPlanes = batchPartPlanesRef.current.get(part.object);
-          if (!partPlanes || partPlanes.length !== activeClipPlanes.length) {
-            partPlanes = activeClipPlanes.map(() => new THREE.Plane());
-            batchPartPlanesRef.current.set(part.object, partPlanes);
-          }
-          for (let i = 0; i < activeClipPlanes.length; i++) {
-            const basePlane = activeClipPlanes[i];
-            partPlanes[i].normal.copy(basePlane.normal);
-            partPlanes[i].constant = basePlane.constant - basePlane.normal.dot(worldDelta);
-          }
-
-          part.object.traverse((child) => {
-            if ((child as THREE.Mesh).isMesh) {
-              const mesh = child as THREE.Mesh;
-              const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
-              mats.forEach((m) => {
-                const clipPlanesChanged = m.clippingPlanes !== partPlanes;
-                m.clippingPlanes = partPlanes!;
-                applyClipSideToMaterial(m, true);
-                if (countChanged || clipPlanesChanged) m.needsUpdate = true;
-              });
-            }
-          });
-        });
-      } else if ((countChanged || explodedClipModeChanged) && currentModelRef.current) {
+      if (countChanged && currentModelRef.current) {
         currentModelRef.current.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
             const mesh = child as THREE.Mesh;
@@ -3560,12 +3516,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       requestRender();
     }, [settings.ssaoEnabled, settings.ssaoRadius, settings.ssaoIntensity, settings.ssaoBias, settings.antialiasMode]);
 
-    // Exploded view — also re-runs clipping plane placement, since a clip plane active while
-    // exploded needs its per-part compensation (see updateClippingPlanes) recomputed on every
-    // step of the explode drag, not just when the plane's own offset/enabled state changes.
     useEffect(() => {
       applyExplode();
-      updateClippingPlanes();
       requestRender();
     }, [settings.explodeAmount]);
 
