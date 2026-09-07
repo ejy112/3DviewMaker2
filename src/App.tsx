@@ -97,6 +97,7 @@ export default function App() {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [volumeStats, setVolumeStats] = useState<VolumeStats | null>(null);
   const [parts, setParts] = useState<LoadedPart[]>([]);
+  const [isolatedPartName, setIsolatedPartName] = useState<string | null>(null);
 
   // Export State
   const [isExportingImage, setIsExportingImage] = useState(false);
@@ -156,6 +157,10 @@ export default function App() {
 
   const handleDriveModelSelected = (file: File) => {
     viewportRef.current?.loadModelFromFile(file);
+  };
+
+  const handleDriveModelsSelected = (files: File[]) => {
+    viewportRef.current?.loadModelsFromFiles(files);
   };
 
   // Turnaround Sheet Image Export
@@ -298,6 +303,8 @@ export default function App() {
         setSettings((prev) => ({ ...prev, showGrid: !prev.showGrid }));
       } else if (key === 'o') {
         setSettings((prev) => ({ ...prev, isOrtho: !prev.isOrtho }));
+      } else if (key === 'i') {
+        viewportRef.current?.toggleIsolateHoveredPart();
       }
     },
     [isFullscreen, driveModalOpen, isMobileSidebarOpen, hasModel, resolution]
@@ -393,6 +400,7 @@ export default function App() {
         parts={parts}
         onTogglePartVisibility={handleTogglePartVisibility}
         onDeletePart={handleDeletePart}
+        isIsolated={isolatedPartName !== null}
       />
 
       {/* 3D Viewport */}
@@ -413,6 +421,7 @@ export default function App() {
           onOpenDriveModal={() => handleOpenDriveModal('import')}
           onVolumeComputed={setVolumeStats}
           onPartsChanged={setParts}
+          onIsolateChanged={setIsolatedPartName}
           isFullscreen={isFullscreen}
         />
       </main>
@@ -427,6 +436,7 @@ export default function App() {
         mode={driveModalMode}
         saveOptions={driveSaveOptions}
         onSelectModelFile={handleDriveModelSelected}
+        onSelectModelFiles={handleDriveModelsSelected}
         theme={theme}
       />
     </div>

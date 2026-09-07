@@ -72,6 +72,7 @@ import {
   Globe,
   Box,
   Square,
+  Focus,
 } from 'lucide-react';
 
 export interface ThreeViewportHandle {
@@ -96,6 +97,7 @@ export interface ThreeViewportHandle {
   ) => void;
   togglePartVisibility: (index: number) => void;
   deletePart: (index: number) => void;
+  toggleIsolateHoveredPart: () => void;
 }
 
 export interface VolumeStats {
@@ -119,6 +121,9 @@ interface ThreeViewportProps {
   onVolumeComputed?: (stats: VolumeStats | null) => void;
   onPartsChanged?: (parts: LoadedPart[]) => void;
   isFullscreen?: boolean;
+  // Fires whenever isolate mode (hover a part, press I) is entered or exited, with the isolated
+  // part's display name, or null once exited — lets the sidebar show/disable accordingly.
+  onIsolateChanged?: (isolatedPartName: string | null) => void;
 }
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>(
@@ -136,6 +141,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       onVolumeComputed,
       onPartsChanged,
       isFullscreen,
+      onIsolateChanged,
     },
     ref
   ) => {
@@ -164,6 +170,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const [loadedFileName, setLoadedFileName] = useState<string | null>(null);
     const [partCount, setPartCount] = useState(0);
     const isFullscreenRef = useRef(false);
+
+    // Isolate mode (hover a part, press I — see toggleIsolateHoveredPart). isolatedPartIndexRef
+    // is which part is currently solo'd, used both to know we're isolated and to restrict
+    // Fit to View to that part's own bounds. preIsolateVisibilityRef snapshots every part's
+    // .visible flag from the moment isolate was entered, so exiting restores exactly what was
+    // hidden/shown before — never just "show everything".
+    const isolatedPartIndexRef = useRef<number | null>(null);
+    const preIsolateVisibilityRef = useRef<boolean[] | null>(null);
+    const [isolatedPartName, setIsolatedPartName] = useState<string | null>(null);
+    // Last pointer position over the canvas, in normalized device coords — kept live via a
+    // pointermove listener so the I-key handler (which fires on window, not the canvas) always
+    // has somewhere to raycast from without needing the mouse event itself.
+    const lastPointerNDCRef = useRef<{ x: number; y: number } | null>(null);
+    const isolateRaycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
     const [thicknessProgress, setThicknessProgress] = useState<number | null>(null);
     const thicknessCalculatingRef = useRef<boolean>(false);
 
@@ -389,6 +409,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const unscaledModelSizeRef = useRef<THREE.Vector3>(new THREE.Vector3(1, 1, 1));
     const unscaledCenterRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
     const modelRadiusRef = useRef<number>(1);
+    // Current world-space center of the bounding box recalculateBounds() last computed — distinct
+    // from unscaledCenterRef (the unscaled model's own local-space center, used when reapplying
+    // scale/rotation). Deleting a part shifts the assembly's true center away from the origin the
+    // model was originally loaded centered on, so Fit to View / preset views must orbit around
+    // this, not a hardcoded (0,0,0), or the remaining geometry ends up off-frame.
+    const modelCenterRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
     const needsRenderRef = useRef<boolean>(true);
 
     const isExportingRef = useRef<boolean>(false);
@@ -511,12 +537,39 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
     };
 
+    // While isolate mode is active, Fit to View / preset views should frame only the isolated
+    // part — everything else's bounds ignored, even though it's still "loaded" and hidden the
+    // same way an individually-unchecked Loaded Mesh is. Outside isolate mode this still covers
+    // the whole model regardless of per-part visibility (Box3.setFromObject doesn't check
+    // .visible), matching the existing "frame what's loaded, not just what's currently shown"
+    // behavior for ordinary hidden parts.
     const recalculateBounds = () => {
       if (!currentModelRef.current) return;
-      const box = new THREE.Box3().setFromObject(currentModelRef.current);
+      const isolatedIndex = isolatedPartIndexRef.current;
+      const isolatedObject =
+        isolatedIndex !== null ? batchPartsRef.current[isolatedIndex]?.object : null;
+      const box = new THREE.Box3().setFromObject(isolatedObject || currentModelRef.current);
       const sphere = new THREE.Sphere();
       box.getBoundingSphere(sphere);
       modelRadiusRef.current = sphere.radius || 1;
+      box.getCenter(modelCenterRef.current);
+    };
+
+    // Distance from modelCenterRef at which a sphere of modelRadiusRef fits inside the current
+    // camera's view, with a little padding to match the ~3% margin updateOrthoFrustum uses. For
+    // a perspective camera this MUST scale with the vertical FOV (which tracks focal length via
+    // setFocalLength) — a fixed radius-based distance looks zoomed way out at wide focal lengths
+    // (wide FOV) and cropped at long ones (narrow FOV), since the same distance subtends a very
+    // different angular size depending on FOV. Orthographic framing doesn't depend on distance
+    // at all (updateOrthoFrustum sets the frustum directly), so any reasonable clearance works.
+    const computeFitDistance = (cam: THREE.Camera): number => {
+      const radius = modelRadiusRef.current || 1;
+      const persp = cam as THREE.PerspectiveCamera;
+      if (persp.isPerspectiveCamera) {
+        const halfFovRad = THREE.MathUtils.degToRad(persp.fov) / 2;
+        return (radius * 1.03) / Math.sin(halfFovRad);
+      }
+      return radius * 3.0;
     };
 
     const updateLights = (cam: THREE.Camera) => {
@@ -1182,12 +1235,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       if (!currentModelRef.current || !activeCameraRef.current || !controlsRef.current) return;
       recalculateBounds();
       const cam = activeCameraRef.current;
+      const center = modelCenterRef.current;
       const dir = new THREE.Vector3().subVectors(cam.position, controlsRef.current.target).normalize();
       if (dir.lengthSq() === 0) dir.set(0, 0, 1);
 
-      controlsRef.current.target.set(0, 0, 0);
-      cam.position.copy(dir.multiplyScalar(modelRadiusRef.current * 3.0));
-      cam.lookAt(0, 0, 0);
+      controlsRef.current.target.copy(center);
+      cam.position.copy(center).addScaledVector(dir, computeFitDistance(cam));
+      cam.lookAt(center);
 
       if (cameraOrthoRef.current) {
         cameraOrthoRef.current.zoom = 1;
@@ -1214,38 +1268,41 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const snapView = (dir: SnapDirection) => {
       if (!currentModelRef.current || !activeCameraRef.current || !controlsRef.current) return;
       recalculateBounds();
-      const dist = modelRadiusRef.current * 3.0;
       const cam = activeCameraRef.current;
-      controlsRef.current.target.set(0, 0, 0);
+      const center = modelCenterRef.current;
+      const dist = computeFitDistance(cam);
+      controlsRef.current.target.copy(center);
 
+      const offset = new THREE.Vector3();
       switch (dir) {
         case 'front':
-          cam.position.set(0, 0, dist);
+          offset.set(0, 0, dist);
           break;
         case 'back':
-          cam.position.set(0, 0, -dist);
+          offset.set(0, 0, -dist);
           break;
         case 'left':
-          cam.position.set(dist, 0, 0);
+          offset.set(dist, 0, 0);
           break;
         case 'right':
-          cam.position.set(-dist, 0, 0);
+          offset.set(-dist, 0, 0);
           break;
         case 'top':
-          cam.position.set(0, dist, 0.0001);
+          offset.set(0, dist, 0.0001);
           break;
         case 'bottom':
-          cam.position.set(0, -dist, 0.0001);
+          offset.set(0, -dist, 0.0001);
           break;
         case 'isofl':
-          cam.position.set(dist * 0.707, dist * 0.5, dist * 0.707);
+          offset.set(dist * 0.707, dist * 0.5, dist * 0.707);
           break;
         case 'isofr':
-          cam.position.set(-dist * 0.707, dist * 0.5, dist * 0.707);
+          offset.set(-dist * 0.707, dist * 0.5, dist * 0.707);
           break;
       }
+      cam.position.copy(center).add(offset);
 
-      cam.lookAt(0, 0, 0);
+      cam.lookAt(center);
       if (cameraOrthoRef.current) cameraOrthoRef.current.zoom = 1;
       if (settingsRef.current.isOrtho) updateOrthoFrustum();
 
@@ -1800,6 +1857,78 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       requestRender();
     };
 
+    // Walks up from a raycast hit (a mesh, possibly nested inside a part's own group) to find
+    // which top-level tracked part owns it.
+    const getPartIndexFromObject = (obj: THREE.Object3D): number | null => {
+      let node: THREE.Object3D | null = obj;
+      while (node) {
+        const idx = batchPartsRef.current.findIndex((part) => part.object === node);
+        if (idx !== -1) return idx;
+        node = node.parent;
+      }
+      return null;
+    };
+
+    // Restores exactly the visibility each part had the moment isolate was entered — never just
+    // "show everything" — since some parts may have already been individually hidden beforehand.
+    const exitIsolate = () => {
+      const snapshot = preIsolateVisibilityRef.current;
+      if (snapshot) {
+        batchPartsRef.current.forEach((part, i) => {
+          part.object.visible = snapshot[i] ?? true;
+        });
+      }
+      isolatedPartIndexRef.current = null;
+      preIsolateVisibilityRef.current = null;
+      setIsolatedPartName(null);
+      onIsolateChanged?.(null);
+      notifyPartsChanged();
+      recenterView();
+    };
+
+    // I, hovering a part: solos it (hides every other loaded part) and snapshots the prior
+    // visibility of all of them so a second I press — regardless of what's hovered by then,
+    // per spec — restores precisely that, not a blanket "show all". No-op if there's nothing to
+    // isolate (single-part model) or nothing under the cursor.
+    const toggleIsolateHoveredPart = () => {
+      if (isolatedPartIndexRef.current !== null) {
+        exitIsolate();
+        return;
+      }
+
+      if (
+        batchPartsRef.current.length <= 1 ||
+        !lastPointerNDCRef.current ||
+        !activeCameraRef.current ||
+        !currentModelRef.current
+      ) {
+        return;
+      }
+
+      isolateRaycasterRef.current.setFromCamera(
+        lastPointerNDCRef.current as THREE.Vector2,
+        activeCameraRef.current
+      );
+      const hits = isolateRaycasterRef.current.intersectObject(currentModelRef.current, true);
+      const hit = hits.find((h) => h.object.visible);
+      if (!hit) return;
+
+      const hitIndex = getPartIndexFromObject(hit.object);
+      if (hitIndex === null) return;
+
+      preIsolateVisibilityRef.current = batchPartsRef.current.map((part) => part.object.visible);
+      isolatedPartIndexRef.current = hitIndex;
+      batchPartsRef.current.forEach((part, i) => {
+        part.object.visible = i === hitIndex;
+      });
+
+      const name = getPartName(batchPartsRef.current[hitIndex].object, hitIndex);
+      setIsolatedPartName(name);
+      onIsolateChanged?.(name);
+      notifyPartsChanged();
+      recenterView();
+    };
+
     const collectMeshMaterials = (obj: THREE.Object3D, into: Set<THREE.Material>) => {
       obj.traverse((child) => {
         const mesh = child as THREE.Mesh;
@@ -1813,6 +1942,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const deletePart = (index: number) => {
       const part = batchPartsRef.current[index];
       if (!part) return;
+
+      // Deleting while isolated would leave isolatedPartIndexRef and the visibility snapshot
+      // pointing at indices that no longer match after the splice below — exit cleanly first
+      // (the sidebar already disables delete while isolated; this is a defensive backstop).
+      if (isolatedPartIndexRef.current !== null) exitIsolate();
 
       // Multiple meshes/parts commonly reference the exact same material (e.g. every part of
       // the demo figurine shares one body material) — only dispose materials this part actually
@@ -2333,10 +2467,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       const durationMs = 4000;
       const cam = activeCameraRef.current;
-      const radius =
-        Math.sqrt(cam.position.x ** 2 + cam.position.z ** 2) || modelRadiusRef.current * 3.0;
+      const target = controlsRef.current?.target || new THREE.Vector3();
+      const relX0 = cam.position.x - target.x;
+      const relZ0 = cam.position.z - target.z;
+      const radius = Math.sqrt(relX0 ** 2 + relZ0 ** 2) || modelRadiusRef.current * 3.0;
       const camY = cam.position.y;
-      const initialAngle = Math.atan2(cam.position.x, cam.position.z);
+      const initialAngle = Math.atan2(relX0, relZ0);
       const startTime = performance.now();
 
       await new Promise<void>((resolve) => {
@@ -2346,8 +2482,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           const progress = Math.min(elapsed / durationMs, 1.0);
           const angle = initialAngle + progress * Math.PI * 2;
 
-          cam.position.x = radius * Math.sin(angle);
-          cam.position.z = radius * Math.cos(angle);
+          cam.position.x = target.x + radius * Math.sin(angle);
+          cam.position.z = target.z + radius * Math.cos(angle);
           cam.position.y = camY;
           if (controlsRef.current) cam.lookAt(controlsRef.current.target);
 
@@ -2395,6 +2531,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       updateDimension,
       togglePartVisibility,
       deletePart,
+      toggleIsolateHoveredPart,
     }));
 
     // Initialize Three.js scene
@@ -2470,6 +2607,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         }
       };
       canvas.addEventListener('pointerdown', handlePointerDown);
+
+      const handlePointerMove = (event: PointerEvent) => {
+        const rect = canvas.getBoundingClientRect();
+        lastPointerNDCRef.current = {
+          x: ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          y: -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        };
+      };
+      canvas.addEventListener('pointermove', handlePointerMove);
 
       // Background/Vignette backdrop — drawn FIRST (as VignetteBackgroundPass, an opaque
       // full-screen plate smoothstepping from the background color at center to the vignette
@@ -2607,11 +2753,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         if (isTurntableActiveRef.current && activeCameraRef.current && controlsRef.current) {
           const speed = 0.008;
           const cam = activeCameraRef.current;
-          const x = cam.position.x;
-          const z = cam.position.z;
-          cam.position.x = x * Math.cos(speed) - z * Math.sin(speed);
-          cam.position.z = x * Math.sin(speed) + z * Math.cos(speed);
-          cam.lookAt(controlsRef.current.target);
+          const target = controlsRef.current.target;
+          // Rotate relative to the orbit target, not world origin — recenterView/snapView can
+          // now put that target away from (0,0,0) (see modelCenterRef), and orbiting around the
+          // origin instead of the actual model center would send the camera drifting off-model.
+          // The +speed sign here (sin(θ+speed) via a(+),b(+) angle-sum expansion) is chosen to
+          // match exportTurntableVideo's `angle = initialAngle + progress*2π` convention — the
+          // two used to rotate in OPPOSITE directions (the recorded video spun backwards from
+          // what the live preview showed) because this loop's old x*cos-z*sin form is actually
+          // sin(θ-speed), decreasing θ while the export increases it.
+          const relX = cam.position.x - target.x;
+          const relZ = cam.position.z - target.z;
+          cam.position.x = target.x + (relX * Math.cos(speed) + relZ * Math.sin(speed));
+          cam.position.z = target.z + (-relX * Math.sin(speed) + relZ * Math.cos(speed));
+          cam.lookAt(target);
 
           // The grid backdrop re-orients every render (see renderFrame/updateGridOrientation)
           // by just copying position/quaternion — no geometry rebuild — so billboarding it
@@ -2636,6 +2791,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         cancelAnimationFrame(animationFrameId);
         resizeObserver.disconnect();
         canvas.removeEventListener('pointerdown', handlePointerDown);
+        canvas.removeEventListener('pointermove', handlePointerMove);
         cleanupScene();
         composerRef.current?.dispose();
         renderer.dispose();
@@ -3584,6 +3740,27 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Isolate Mode HUD — hover a part and press I to solo it; press I again (from
+            anywhere) or click here to restore exactly what was hidden/shown before. */}
+        {isolatedPartName && (
+          <div
+            id="isolateModeHud"
+            className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-slate-900/90 border border-sky-500/50 shadow-xl backdrop-blur-md text-xs"
+          >
+            <Focus className="w-4 h-4 text-sky-400" />
+            <span className="font-medium text-slate-200">
+              Isolated: <span className="text-sky-400 font-semibold">{isolatedPartName}</span>
+            </span>
+            <button
+              onClick={() => toggleIsolateHoveredPart()}
+              title="Exit isolate mode (I)"
+              className="p-0.5 rounded text-slate-400 hover:text-white cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 
