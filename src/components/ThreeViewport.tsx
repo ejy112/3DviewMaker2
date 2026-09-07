@@ -332,6 +332,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // already-enabled plane's offset/flip is dragged (that's a plain uniform update).
     const activeClipPlanesRef = useRef<THREE.Plane[]>([]);
     const clipSignatureRef = useRef<string>('');
+    // Per-part clip planes while Exploded View is active — each part's own copy of the base
+    // planes, shifted by that part's current explosion displacement, so a clip keeps cutting
+    // through the model's resting/assembled geometry (locked to the part) instead of through
+    // wherever empty space the part has since moved to. Cleared in cleanupScene — a plain Map
+    // holds strong references to its keys, so old parts would otherwise never be released.
+    const batchPartPlanesRef = useRef<Map<THREE.Object3D, THREE.Plane[]>>(new Map());
 
     // Matcap texture (procedurally generated zebra-stripe matcap)
     const matcapZebraTextureRef = useRef<THREE.Texture | null>(null);
@@ -608,6 +614,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       setThicknessProgress(null);
       batchPartsRef.current = [];
       batchGroupCenterRef.current.set(0, 0, 0);
+      batchPartPlanesRef.current.clear();
       if (selectedPartIndexRef.current !== null) selectPart(null);
       if (thicknessMaterialRef.current) {
         thicknessMaterialRef.current.uniforms.uIsReady.value = 0.0;
@@ -977,6 +984,16 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         return;
       }
 
+      // "No Environment" — skip IBL/reflection map entirely rather than loading or building one.
+      // The scene's own directional/ambient lighting rig (unaffected by scene.environment) still
+      // lights the model normally; this just removes the environment reflections/contribution,
+      // equivalent to intensity 0 but without touching the Environment Intensity slider itself.
+      if (preset === 'none') {
+        sceneRef.current.environment = null;
+        requestRender();
+        return;
+      }
+
       const matchedHdri = hdriListRef.current.find(
         (h) => h.id.toLowerCase() === preset.toLowerCase() || h.name.toLowerCase() === preset.toLowerCase()
       );
@@ -1313,22 +1330,63 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         aoPassRef.current.normalMaterial.clippingPlanes = nextClippingPlanes;
       }
 
-      // Clip planes stay fixed in world space regardless of Exploded View — the plane never
-      // shifts to track a part's explosion displacement. A part cuts wherever it currently sits
-      // relative to the (unmoving) plane: pieces that explode away from it eventually clear the
-      // cut and render whole again, and pieces exploding into it can pick up a new cut, exactly
-      // as if the plane were a fixed blade parts are moving past, not something carried along
-      // with each part.
       const clippingActive = activeClipPlanes.length > 0;
-      if (countChanged && currentModelRef.current) {
+      const isExploded = batchPartsRef.current.length > 1 && (settingsRef.current.explodeAmount || 0) > 0;
+      const rot = currentModelRef.current ? currentModelRef.current.rotation : new THREE.Euler();
+      const scale = dimensionsRef.current.scaleFactor || 1;
+
+      if (isExploded && clippingActive) {
+        // Pre-exploded per-object clipping: the slice is defined relative to the model's resting
+        // assembly. Each part gets its own copy of the base planes, shifted by that part's current
+        // world explosion displacement, so the cut stays locked to the part's pre-explosion
+        // geometry as it travels — exactly as if it had been sliced before exploding, not
+        // re-sliced against a plane sitting fixed in empty space.
+        batchPartsRef.current.forEach((part) => {
+          const localDelta = part.object.position.clone().sub(part.basePosition);
+          const worldDelta = localDelta.applyEuler(rot).multiplyScalar(scale);
+
+          let partPlanes = batchPartPlanesRef.current.get(part.object);
+          if (!partPlanes || partPlanes.length !== activeClipPlanes.length) {
+            partPlanes = activeClipPlanes.map(() => new THREE.Plane());
+            batchPartPlanesRef.current.set(part.object, partPlanes);
+          }
+
+          for (let i = 0; i < activeClipPlanes.length; i++) {
+            const basePlane = activeClipPlanes[i];
+            partPlanes[i].normal.copy(basePlane.normal);
+            // C_part = C_base - dot(normal, worldDelta)
+            partPlanes[i].constant = basePlane.constant - basePlane.normal.dot(worldDelta);
+          }
+
+          part.object.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const mesh = child as THREE.Mesh;
+              const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+              mats.forEach((m) => {
+                const clipPlanesChanged = m.clippingPlanes !== partPlanes;
+                m.clippingPlanes = partPlanes!;
+                m.clipShadows = true;
+                applyClipSideToMaterial(m, true);
+                if (countChanged || clipPlanesChanged) {
+                  m.needsUpdate = true;
+                }
+              });
+            }
+          });
+        });
+      } else if (currentModelRef.current) {
         currentModelRef.current.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
             const mesh = child as THREE.Mesh;
             const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
             mats.forEach((m) => {
+              const clipPlanesChanged = m.clippingPlanes !== nextClippingPlanes;
               m.clippingPlanes = nextClippingPlanes;
+              m.clipShadows = true;
               applyClipSideToMaterial(m, clippingActive);
-              m.needsUpdate = true;
+              if (countChanged || clipPlanesChanged) {
+                m.needsUpdate = true;
+              }
             });
           }
         });
@@ -1434,6 +1492,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           }
         }
       });
+      // The traversal above unconditionally set every mesh's clippingPlanes to the shared
+      // (non-exploded) array — while Exploded View is active, that stomps over the per-part
+      // compensated planes updateClippingPlanes() just built. Re-run it to put those back.
+      if (batchPartsRef.current.length > 1 && (settingsRef.current.explodeAmount || 0) > 0) {
+        updateClippingPlanes();
+      }
       requestRender();
     };
 
@@ -2122,6 +2186,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         dir.normalize().multiplyScalar(amount * magnitude);
         part.object.position.copy(part.basePosition).add(dir);
       });
+      // Synchronize clipping planes with exploded part positions (slices pre-exploded, then carried along)
+      updateClippingPlanes();
     };
 
     // Populates batchPartsRef from a freshly-loaded single GLB/glTF's own top-level nodes, so
@@ -2297,13 +2363,21 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       });
     };
 
-    const deletePart = (index: number) => {
+    // Removes one part's object from the scene graph and frees its geometry — the cheap, O(part
+    // size) half of a delete. Collects materials the part *might* have exclusively owned into
+    // candidateMaterials without disposing them yet, since a sibling part elsewhere in the model
+    // (still to be checked) may share the same material instance. Deliberately excludes the
+    // O(whole model) work (material-still-used scan, bounds, volume/watertight) so a caller
+    // removing several parts at once can batch all of that into one pass afterward instead of
+    // repeating it per part — see settleAfterPartRemoval.
+    const removePartCore = (index: number, candidateMaterials: Set<THREE.Material>) => {
       const part = batchPartsRef.current[index];
       if (!part) return;
 
       // Deleting while isolated would leave isolatedPartIndexRef and the visibility snapshot
       // pointing at indices that no longer match after the splice below — exit cleanly first
       // (the sidebar already disables delete while isolated; this is a defensive backstop).
+      // A no-op on every call after the first, once isolatedPartIndexRef is already cleared.
       if (isolatedPartIndexRef.current !== null) exitIsolate();
 
       // Same reasoning for the click-to-select index: clear it if the deleted part was selected,
@@ -2314,11 +2388,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         selectPart(selectedPartIndexRef.current - 1);
       }
 
-      // Multiple meshes/parts commonly reference the exact same material (e.g. every part of
-      // the demo figurine shares one body material) — only dispose materials this part actually
-      // owns exclusively, or a still-visible sibling would lose its material out from under it.
-      // Geometry is never shared between separate parts, so that's always safe to free.
-      const candidateMaterials = new Set<THREE.Material>();
       collectMeshMaterials(part.object, candidateMaterials);
 
       part.object.parent?.remove(part.object);
@@ -2328,7 +2397,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         const mesh = child as THREE.Mesh;
         if (mesh.isMesh) mesh.geometry?.dispose();
       });
+    };
 
+    // The O(whole remaining model) settle pass after one or more removePartCore calls: frees
+    // materials no longer referenced anywhere, recomputes bounds/grid, and refreshes volume
+    // stats. Callers should batch every removal they can into a single candidateMaterials set
+    // and call this once at the end, not per part — computeVolumeAndWatertight in particular
+    // walks every triangle of the remaining model, so repeating it per part turns an N-part
+    // batch delete into an O(N * triangles) stall.
+    const settleAfterPartRemoval = (candidateMaterials: Set<THREE.Material>) => {
       if (currentModelRef.current) {
         const stillUsed = new Set<THREE.Material>();
         collectMeshMaterials(currentModelRef.current, stillUsed);
@@ -2338,27 +2415,45 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
         recalculateBounds();
         updateGrid();
-        const { meshCount } = computeVolumeAndWatertight(currentModelRef.current);
-        const partCount = batchPartsRef.current.length > 0 ? batchPartsRef.current.length : 1;
-        refreshVolumeStats(Math.max(partCount, meshCount > 0 ? 1 : 0));
       } else {
         candidateMaterials.forEach((m) => m.dispose());
       }
       notifyPartsChanged();
       requestRender();
+
+      // Defer the triangle-walk to the next frame so the deletion itself (mesh gone, list
+      // updated, viewport repainted) is what the click feels like — the volume/weight/cost
+      // panel catches up a beat later instead of the whole interaction stalling on it.
+      requestAnimationFrame(() => {
+        if (!currentModelRef.current) return;
+        const { meshCount } = computeVolumeAndWatertight(currentModelRef.current);
+        const partCount = batchPartsRef.current.length > 0 ? batchPartsRef.current.length : 1;
+        refreshVolumeStats(Math.max(partCount, meshCount > 0 ? 1 : 0));
+      });
     };
 
-    // Purges every currently-hidden part from the scene/memory in one action — each removal goes
-    // through deletePart so isolate-guarding, material cleanup, and bounds recalc stay consistent
-    // with a single manual delete. Runs highest-index-first so earlier splices don't shift the
-    // indices still queued for removal.
+    const deletePart = (index: number) => {
+      const candidateMaterials = new Set<THREE.Material>();
+      removePartCore(index, candidateMaterials);
+      settleAfterPartRemoval(candidateMaterials);
+    };
+
+    // Purges every currently-hidden part from the scene/memory in one action. Batches every
+    // removal's material bookkeeping into one set and runs the expensive settle pass (material
+    // GC scan, bounds, volume/watertight) exactly once at the end instead of once per part — see
+    // removePartCore/settleAfterPartRemoval. Runs highest-index-first so earlier splices don't
+    // shift the indices still queued for removal.
     const deleteHiddenParts = () => {
       const hiddenIndices = batchPartsRef.current
         .map((part, i) => (!part.object.visible ? i : -1))
         .filter((i) => i !== -1);
+      if (hiddenIndices.length === 0) return;
+
+      const candidateMaterials = new Set<THREE.Material>();
       for (let i = hiddenIndices.length - 1; i >= 0; i--) {
-        deletePart(hiddenIndices[i]);
+        removePartCore(hiddenIndices[i], candidateMaterials);
       }
+      settleAfterPartRemoval(candidateMaterials);
     };
 
     // Load sample default model
@@ -2593,6 +2688,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       const dist = modelRadiusRef.current * 3.0;
       const halfFrustum = modelRadiusRef.current * 1.03;
+      // recalculateBounds() above may have just recentered modelCenterRef away from the world
+      // origin (deleting parts or isolating one shifts the remaining geometry's bounding center) —
+      // every view position/look-at below must pivot around that center, not (0, 0, 0), or a
+      // model whose center has drifted renders outside the frustum on axes it drifted along.
+      const exportCenter = modelCenterRef.current.clone();
       const exportCam = new THREE.OrthographicCamera(
         -halfFrustum,
         halfFrustum,
@@ -2667,8 +2767,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         onProgress(`Rendering (${currentViewIdx + 1}/8)...`);
 
         const v = views[currentViewIdx];
-        exportCam.position.copy(v.pos);
-        exportCam.lookAt(0, 0, 0);
+        exportCam.position.copy(exportCenter).add(v.pos);
+        exportCam.lookAt(exportCenter);
         exportCam.updateProjectionMatrix();
 
         updateLights(exportCam);
@@ -3958,6 +4058,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                       {settings.customHdriFileName && (
                         <option value="custom_upload">★ Custom: {settings.customHdriFileName}</option>
                       )}
+                      <option value="none">No Environment (Default Lighting)</option>
                       {(['Studio', 'Outdoor', 'Interior'] as const).map((category) => {
                         const items = deduplicateHdris(hdriList).filter(
                           (h) => (h.category || 'Studio').toLowerCase() === category.toLowerCase()
