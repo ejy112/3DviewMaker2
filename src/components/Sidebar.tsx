@@ -60,6 +60,10 @@ interface SidebarProps {
   parts: LoadedPart[];
   onTogglePartVisibility: (index: number) => void;
   onDeletePart: (index: number) => void;
+  // Isolate mode (hover a part, press I) is exclusively-managed by a snapshot/restore in
+  // ThreeViewport — editing visibility here mid-isolate would conflict with that, so the whole
+  // Loaded Meshes list goes read-only (but still visible) while it's active.
+  isIsolated?: boolean;
 }
 
 interface DimensionInputProps {
@@ -246,6 +250,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   parts,
   onTogglePartVisibility,
   onDeletePart,
+  isIsolated,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -397,7 +402,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v0.99
+                  v1.00
                 </span>
               </span>
             </div>
@@ -498,29 +503,41 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <div className="flex items-center gap-2">
                     <button
                       onClick={handleShowAllParts}
-                      title="Show every loaded part"
-                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap"
+                      disabled={isIsolated}
+                      title={isIsolated ? 'Exit isolate mode (I) to change visibility' : 'Show every loaded part'}
+                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400"
                     >
                       Show All
                     </button>
                     <button
                       onClick={handleHideAllParts}
-                      title="Hide every loaded part"
-                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap"
+                      disabled={isIsolated}
+                      title={isIsolated ? 'Exit isolate mode (I) to change visibility' : 'Hide every loaded part'}
+                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400"
                     >
                       Hide All
                     </button>
                   </div>
                 }
               >
+                {isIsolated && (
+                  <div className="text-[10px] text-sky-400 leading-tight -mt-1 pb-0.5">
+                    Isolated — press <b>I</b> to exit before changing visibility or deleting parts.
+                  </div>
+                )}
                 {parts.map((part, i) => (
                   <div key={`${part.name}-${i}`} className="flex items-center justify-between gap-2">
-                    <label className="flex items-center gap-2 min-w-0 cursor-pointer">
+                    <label
+                      className={`flex items-center gap-2 min-w-0 ${
+                        isIsolated ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+                      }`}
+                    >
                       <input
                         type="checkbox"
                         checked={part.visible}
+                        disabled={isIsolated}
                         onChange={() => onTogglePartVisibility(i)}
-                        className="accent-sky-500 w-4 h-4 cursor-pointer shrink-0"
+                        className="accent-sky-500 w-4 h-4 shrink-0 disabled:cursor-not-allowed cursor-pointer"
                       />
                       <span className="truncate" title={part.name}>
                         {part.name}
@@ -528,8 +545,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </label>
                     <button
                       onClick={() => onDeletePart(i)}
-                      title="Remove this part from the scene and free its memory"
-                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0"
+                      disabled={isIsolated}
+                      title={isIsolated ? 'Exit isolate mode (I) to delete parts' : 'Remove this part from the scene and free its memory'}
+                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

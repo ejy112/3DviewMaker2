@@ -72,6 +72,7 @@ import {
   Globe,
   Box,
   Square,
+  Focus,
 } from 'lucide-react';
 
 export interface ThreeViewportHandle {
@@ -96,6 +97,7 @@ export interface ThreeViewportHandle {
   ) => void;
   togglePartVisibility: (index: number) => void;
   deletePart: (index: number) => void;
+  toggleIsolateHoveredPart: () => void;
 }
 
 export interface VolumeStats {
@@ -119,6 +121,9 @@ interface ThreeViewportProps {
   onVolumeComputed?: (stats: VolumeStats | null) => void;
   onPartsChanged?: (parts: LoadedPart[]) => void;
   isFullscreen?: boolean;
+  // Fires whenever isolate mode (hover a part, press I) is entered or exited, with the isolated
+  // part's display name, or null once exited — lets the sidebar show/disable accordingly.
+  onIsolateChanged?: (isolatedPartName: string | null) => void;
 }
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>(
@@ -136,6 +141,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       onVolumeComputed,
       onPartsChanged,
       isFullscreen,
+      onIsolateChanged,
     },
     ref
   ) => {
@@ -164,6 +170,20 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const [loadedFileName, setLoadedFileName] = useState<string | null>(null);
     const [partCount, setPartCount] = useState(0);
     const isFullscreenRef = useRef(false);
+
+    // Isolate mode (hover a part, press I — see toggleIsolateHoveredPart). isolatedPartIndexRef
+    // is which part is currently solo'd, used both to know we're isolated and to restrict
+    // Fit to View to that part's own bounds. preIsolateVisibilityRef snapshots every part's
+    // .visible flag from the moment isolate was entered, so exiting restores exactly what was
+    // hidden/shown before — never just "show everything".
+    const isolatedPartIndexRef = useRef<number | null>(null);
+    const preIsolateVisibilityRef = useRef<boolean[] | null>(null);
+    const [isolatedPartName, setIsolatedPartName] = useState<string | null>(null);
+    // Last pointer position over the canvas, in normalized device coords — kept live via a
+    // pointermove listener so the I-key handler (which fires on window, not the canvas) always
+    // has somewhere to raycast from without needing the mouse event itself.
+    const lastPointerNDCRef = useRef<{ x: number; y: number } | null>(null);
+    const isolateRaycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
     const [thicknessProgress, setThicknessProgress] = useState<number | null>(null);
     const thicknessCalculatingRef = useRef<boolean>(false);
 
@@ -517,9 +537,18 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
     };
 
+    // While isolate mode is active, Fit to View / preset views should frame only the isolated
+    // part — everything else's bounds ignored, even though it's still "loaded" and hidden the
+    // same way an individually-unchecked Loaded Mesh is. Outside isolate mode this still covers
+    // the whole model regardless of per-part visibility (Box3.setFromObject doesn't check
+    // .visible), matching the existing "frame what's loaded, not just what's currently shown"
+    // behavior for ordinary hidden parts.
     const recalculateBounds = () => {
       if (!currentModelRef.current) return;
-      const box = new THREE.Box3().setFromObject(currentModelRef.current);
+      const isolatedIndex = isolatedPartIndexRef.current;
+      const isolatedObject =
+        isolatedIndex !== null ? batchPartsRef.current[isolatedIndex]?.object : null;
+      const box = new THREE.Box3().setFromObject(isolatedObject || currentModelRef.current);
       const sphere = new THREE.Sphere();
       box.getBoundingSphere(sphere);
       modelRadiusRef.current = sphere.radius || 1;
@@ -1828,6 +1857,78 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       requestRender();
     };
 
+    // Walks up from a raycast hit (a mesh, possibly nested inside a part's own group) to find
+    // which top-level tracked part owns it.
+    const getPartIndexFromObject = (obj: THREE.Object3D): number | null => {
+      let node: THREE.Object3D | null = obj;
+      while (node) {
+        const idx = batchPartsRef.current.findIndex((part) => part.object === node);
+        if (idx !== -1) return idx;
+        node = node.parent;
+      }
+      return null;
+    };
+
+    // Restores exactly the visibility each part had the moment isolate was entered — never just
+    // "show everything" — since some parts may have already been individually hidden beforehand.
+    const exitIsolate = () => {
+      const snapshot = preIsolateVisibilityRef.current;
+      if (snapshot) {
+        batchPartsRef.current.forEach((part, i) => {
+          part.object.visible = snapshot[i] ?? true;
+        });
+      }
+      isolatedPartIndexRef.current = null;
+      preIsolateVisibilityRef.current = null;
+      setIsolatedPartName(null);
+      onIsolateChanged?.(null);
+      notifyPartsChanged();
+      recenterView();
+    };
+
+    // I, hovering a part: solos it (hides every other loaded part) and snapshots the prior
+    // visibility of all of them so a second I press — regardless of what's hovered by then,
+    // per spec — restores precisely that, not a blanket "show all". No-op if there's nothing to
+    // isolate (single-part model) or nothing under the cursor.
+    const toggleIsolateHoveredPart = () => {
+      if (isolatedPartIndexRef.current !== null) {
+        exitIsolate();
+        return;
+      }
+
+      if (
+        batchPartsRef.current.length <= 1 ||
+        !lastPointerNDCRef.current ||
+        !activeCameraRef.current ||
+        !currentModelRef.current
+      ) {
+        return;
+      }
+
+      isolateRaycasterRef.current.setFromCamera(
+        lastPointerNDCRef.current as THREE.Vector2,
+        activeCameraRef.current
+      );
+      const hits = isolateRaycasterRef.current.intersectObject(currentModelRef.current, true);
+      const hit = hits.find((h) => h.object.visible);
+      if (!hit) return;
+
+      const hitIndex = getPartIndexFromObject(hit.object);
+      if (hitIndex === null) return;
+
+      preIsolateVisibilityRef.current = batchPartsRef.current.map((part) => part.object.visible);
+      isolatedPartIndexRef.current = hitIndex;
+      batchPartsRef.current.forEach((part, i) => {
+        part.object.visible = i === hitIndex;
+      });
+
+      const name = getPartName(batchPartsRef.current[hitIndex].object, hitIndex);
+      setIsolatedPartName(name);
+      onIsolateChanged?.(name);
+      notifyPartsChanged();
+      recenterView();
+    };
+
     const collectMeshMaterials = (obj: THREE.Object3D, into: Set<THREE.Material>) => {
       obj.traverse((child) => {
         const mesh = child as THREE.Mesh;
@@ -1841,6 +1942,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const deletePart = (index: number) => {
       const part = batchPartsRef.current[index];
       if (!part) return;
+
+      // Deleting while isolated would leave isolatedPartIndexRef and the visibility snapshot
+      // pointing at indices that no longer match after the splice below — exit cleanly first
+      // (the sidebar already disables delete while isolated; this is a defensive backstop).
+      if (isolatedPartIndexRef.current !== null) exitIsolate();
 
       // Multiple meshes/parts commonly reference the exact same material (e.g. every part of
       // the demo figurine shares one body material) — only dispose materials this part actually
@@ -2425,6 +2531,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       updateDimension,
       togglePartVisibility,
       deletePart,
+      toggleIsolateHoveredPart,
     }));
 
     // Initialize Three.js scene
@@ -2500,6 +2607,15 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         }
       };
       canvas.addEventListener('pointerdown', handlePointerDown);
+
+      const handlePointerMove = (event: PointerEvent) => {
+        const rect = canvas.getBoundingClientRect();
+        lastPointerNDCRef.current = {
+          x: ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          y: -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        };
+      };
+      canvas.addEventListener('pointermove', handlePointerMove);
 
       // Background/Vignette backdrop — drawn FIRST (as VignetteBackgroundPass, an opaque
       // full-screen plate smoothstepping from the background color at center to the vignette
@@ -2675,6 +2791,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         cancelAnimationFrame(animationFrameId);
         resizeObserver.disconnect();
         canvas.removeEventListener('pointerdown', handlePointerDown);
+        canvas.removeEventListener('pointermove', handlePointerMove);
         cleanupScene();
         composerRef.current?.dispose();
         renderer.dispose();
@@ -3623,6 +3740,27 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Isolate Mode HUD — hover a part and press I to solo it; press I again (from
+            anywhere) or click here to restore exactly what was hidden/shown before. */}
+        {isolatedPartName && (
+          <div
+            id="isolateModeHud"
+            className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-slate-900/90 border border-sky-500/50 shadow-xl backdrop-blur-md text-xs"
+          >
+            <Focus className="w-4 h-4 text-sky-400" />
+            <span className="font-medium text-slate-200">
+              Isolated: <span className="text-sky-400 font-semibold">{isolatedPartName}</span>
+            </span>
+            <button
+              onClick={() => toggleIsolateHoveredPart()}
+              title="Exit isolate mode (I)"
+              className="p-0.5 rounded text-slate-400 hover:text-white cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 
