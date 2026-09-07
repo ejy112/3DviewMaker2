@@ -45,6 +45,9 @@ class VignetteBackgroundPass extends Pass {
   }
 }
 import { MeshBVH } from 'three-mesh-bvh';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import {
   LoadedPart,
   MaterialKey,
@@ -53,6 +56,7 @@ import {
   SnapDirection,
   ThemeMode,
   ViewerSettings,
+  HdriManifestItem,
 } from '../types';
 import {
   Loader2,
@@ -73,7 +77,40 @@ import {
   Box,
   Square,
   Focus,
+  RefreshCw,
+  ExternalLink,
 } from 'lucide-react';
+
+export const DEFAULT_HDRI_PRESETS: HdriManifestItem[] = [
+  { id: 'studio', name: 'Studio Neutral (Key & Fill)', file: 'hdri/studio-a.hdr', category: 'Studio' },
+  { id: 'studio_contrast', name: 'Studio Contrast (Rim Kickers)', file: 'hdri/studio-b.hdr', category: 'Studio' },
+  { id: 'warm_studio', name: 'Warm Studio (Amber Glow)', file: 'hdri/warm-studio.hdr', category: 'Studio' },
+  { id: 'dark_studio', name: 'Dark Workshop (Moody Spot)', file: 'hdri/dark-studio.hdr', category: 'Studio' },
+  { id: 'wood_studio', name: 'Wood Lounge (Warm Interior)', file: 'hdri/wood-studio.hdr', category: 'Studio' },
+  { id: 'outdoor', name: 'Daylight (Pure Sun & Sky)', file: 'hdri/day.hdr', category: 'Outdoor' },
+  { id: 'sunset', name: 'Golden Hour Sunset', file: 'hdri/golden.hdr', category: 'Outdoor' },
+  { id: 'clearing_mist', name: 'Clearing Mist (Overcast Soft)', file: 'hdri/clearing-mist.hdr', category: 'Outdoor' },
+  { id: 'interior', name: 'Interior Grand Hall', file: 'hdri/interior.hdr', category: 'Interior' },
+];
+
+export const deduplicateHdris = (items: HdriManifestItem[]): HdriManifestItem[] => {
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  const seenFiles = new Set<string>();
+  const result: HdriManifestItem[] = [];
+  for (const item of items) {
+    const normId = item.id.toLowerCase().trim();
+    const normName = item.name.toLowerCase().trim();
+    const normFile = item.file.toLowerCase().trim();
+    if (!seenIds.has(normId) && !seenNames.has(normName) && !seenFiles.has(normFile)) {
+      seenIds.add(normId);
+      seenNames.add(normName);
+      seenFiles.add(normFile);
+      result.push(item);
+    }
+  }
+  return result;
+};
 
 export interface ThreeViewportHandle {
   recenterView: () => void;
@@ -97,6 +134,9 @@ export interface ThreeViewportHandle {
   ) => void;
   togglePartVisibility: (index: number) => void;
   deletePart: (index: number) => void;
+  deleteHiddenParts: () => void;
+  selectPart: (index: number | null) => void;
+  toggleSelectedOrHoveredVisibility: () => void;
   toggleIsolateHoveredPart: () => void;
 }
 
@@ -124,6 +164,10 @@ interface ThreeViewportProps {
   // Fires whenever isolate mode (hover a part, press I) is entered or exited, with the isolated
   // part's display name, or null once exited — lets the sidebar show/disable accordingly.
   onIsolateChanged?: (isolatedPartName: string | null) => void;
+  // Click-to-select a mesh in the viewport (blue bounding-box highlight). Controlled from the
+  // parent so a click in the Loaded Meshes list can select/deselect the same part.
+  selectedPartIndex?: number | null;
+  onSelectPart?: (index: number | null) => void;
 }
 
 export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>(
@@ -142,6 +186,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       onPartsChanged,
       isFullscreen,
       onIsolateChanged,
+      selectedPartIndex,
+      onSelectPart,
     },
     ref
   ) => {
@@ -184,6 +230,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // has somewhere to raycast from without needing the mouse event itself.
     const lastPointerNDCRef = useRef<{ x: number; y: number } | null>(null);
     const isolateRaycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
+    // Click-to-select: which part is selected (blue THREE.BoxHelper outline, see selectPart) and
+    // where the pointer went down, so a click-drag orbit isn't mistaken for a click-to-select.
+    const selectedPartIndexRef = useRef<number | null>(null);
+    const selectionHelperRef = useRef<THREE.BoxHelper | null>(null);
+    const pointerDownPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
     const [thicknessProgress, setThicknessProgress] = useState<number | null>(null);
     const thicknessCalculatingRef = useRef<boolean>(false);
 
@@ -215,8 +266,45 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     const fxaaPassRef = useRef<ShaderPass | null>(null);
     const smaaPassRef = useRef<SMAAPass | null>(null);
 
-    // Environments (procedural PMREM presets — no external HDR files needed)
+    // Environments: real HDR files (from /public/hdri + this manifest) take priority per preset,
+    // falling back to a procedural PMREM-baked scene (buildEnvironmentScene) when no HDR matches
+    // or fails to load. envSourceFileRef tracks which source (a specific .hdr file, or
+    // 'procedural') is actually cached under envTexturesRef[preset] so a manifest refresh or a
+    // newly-uploaded custom HDR correctly invalidates a stale cache entry instead of reusing it.
     const envTexturesRef = useRef<Partial<Record<string, THREE.Texture>>>({});
+    const envSourceFileRef = useRef<Record<string, string>>({});
+    const customHdriTextureRef = useRef<THREE.Texture | null>(null);
+    const [hdriList, setHdriList] = useState<HdriManifestItem[]>(DEFAULT_HDRI_PRESETS);
+    const hdriListRef = useRef<HdriManifestItem[]>(DEFAULT_HDRI_PRESETS);
+    hdriListRef.current = hdriList;
+    const [isHdriLoading, setIsHdriLoading] = useState<boolean>(false);
+
+    // Lets a maintainer add more HDRs to public/hdri/manifest.json post-deploy (a static-hosting
+    // friendly alternative to rebuilding the whole app) without touching this component's code —
+    // merged with and deduplicated against the baked-in defaults so the manifest can't break the
+    // built-in presets by omitting them.
+    const loadHdriManifest = async () => {
+      try {
+        const res = await fetch(`${import.meta.env.BASE_URL}hdri/manifest.json?t=${Date.now()}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.hdris) && data.hdris.length > 0) {
+            const merged = deduplicateHdris([...data.hdris, ...DEFAULT_HDRI_PRESETS]);
+            setHdriList(merged);
+            hdriListRef.current = merged;
+            envTexturesRef.current = {};
+            envSourceFileRef.current = {};
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load HDRI manifest:', err);
+      }
+    };
+
+    useEffect(() => {
+      loadHdriManifest();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // Batch-loaded parts (for exploded view). basePosition is each part's resting local
     // position — (0,0,0) for batch-loaded files (each keeps its own baked-in origin and is
@@ -514,6 +602,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       setThicknessProgress(null);
       batchPartsRef.current = [];
       batchGroupCenterRef.current.set(0, 0, 0);
+      if (selectedPartIndexRef.current !== null) selectPart(null);
       if (thicknessMaterialRef.current) {
         thicknessMaterialRef.current.uniforms.uIsReady.value = 0.0;
       }
@@ -656,72 +745,293 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     };
 
     // Procedural environment presets (PMREM-generated, no external .hdr/.exr files required)
+    // Radial-gradient softbox card — used as a plane's map so it reads as a soft glowing studio
+    // light panel in specular reflections, rather than a harsh flat rectangle.
+    const createSoftboxTexture = (width = 256, height = 256, r = 1.0, g = 1.0, b = 1.0): THREE.CanvasTexture => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = Math.min(width, height) * 0.48;
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+        grad.addColorStop(0, `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, 1.0)`);
+        grad.addColorStop(0.5, `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, 0.92)`);
+        grad.addColorStop(0.82, `rgba(${Math.round(r * 240)}, ${Math.round(g * 245)}, ${Math.round(b * 255)}, 0.35)`);
+        grad.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, width, height);
+      }
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    };
+
+    // Vertical gradient sky panorama — used as a sphere's inward-facing map for outdoor/sunset
+    // presets so reflections show a natural sky gradient instead of one flat color.
+    const createGradientSkyTexture = (topColor: string, midColor: string, bottomColor: string): THREE.CanvasTexture => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 32;
+      canvas.height = 512;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const grad = ctx.createLinearGradient(0, 0, 0, 512);
+        grad.addColorStop(0, topColor);
+        grad.addColorStop(0.52, midColor);
+        grad.addColorStop(1.0, bottomColor);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 32, 512);
+      }
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    };
+
+    // Procedural fallback used only when no real HDR file matches a preset, or one fails to
+    // load — baked into a PMREM reflection map the same way a loaded HDR is, never rendered as a
+    // visible backdrop. Softbox/sky-gradient cards read as smooth, natural-looking reflections
+    // instead of the harsh flat-color panels the previous version used.
     const buildEnvironmentScene = (preset: string): THREE.Scene => {
       const envScene = new THREE.Scene();
+
       if (preset === 'outdoor') {
-        envScene.background = new THREE.Color(0x8fb8e8);
-        const sky = new THREE.Mesh(
-          new THREE.SphereGeometry(50, 16, 16),
-          new THREE.MeshBasicMaterial({ color: 0x8fb8e8, side: THREE.BackSide })
-        );
-        envScene.add(sky);
-        const ground = new THREE.Mesh(
-          new THREE.CircleGeometry(50, 32),
-          new THREE.MeshBasicMaterial({ color: 0x6b7d5c })
-        );
+        const skyTex = createGradientSkyTexture('#1a65b8', '#8ec0eb', '#eef6fc');
+        const skyGeo = new THREE.SphereGeometry(60, 32, 24);
+        const skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide });
+        envScene.add(new THREE.Mesh(skyGeo, skyMat));
+
+        const groundGeo = new THREE.CircleGeometry(60, 32);
+        const groundMat = new THREE.MeshBasicMaterial({ color: 0x485a3c });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
         ground.rotation.x = -Math.PI / 2;
-        ground.position.y = -8;
+        ground.position.y = -6;
         envScene.add(ground);
-        const sun = new THREE.PointLight(0xfff4e0, 30, 100);
-        sun.position.set(15, 20, 10);
+
+        const sunTex = createSoftboxTexture(256, 256, 1.0, 0.98, 0.9);
+        const sunMat = new THREE.MeshBasicMaterial({ map: sunTex, transparent: true, side: THREE.DoubleSide });
+        const sun = new THREE.Mesh(new THREE.PlaneGeometry(16, 16), sunMat);
+        sun.position.set(22, 30, 20);
+        sun.lookAt(0, 0, 0);
         envScene.add(sun);
+
+        const cloudTex = createSoftboxTexture(256, 256, 0.9, 0.95, 1.0);
+        const cloudMat = new THREE.MeshBasicMaterial({ map: cloudTex, transparent: true, opacity: 0.75, side: THREE.DoubleSide });
+        const cloud1 = new THREE.Mesh(new THREE.PlaneGeometry(32, 20), cloudMat);
+        cloud1.position.set(-25, 22, -18);
+        cloud1.lookAt(0, 0, 0);
+        envScene.add(cloud1);
+
+        const sunLight = new THREE.DirectionalLight(0xfffaed, 3.5);
+        sunLight.position.set(22, 30, 20);
+        envScene.add(sunLight);
       } else if (preset === 'interior') {
-        envScene.background = new THREE.Color(0x2a231c);
-        const warmLight1 = new THREE.PointLight(0xffcf9e, 20, 60);
-        warmLight1.position.set(8, 10, 8);
-        envScene.add(warmLight1);
-        const warmLight2 = new THREE.PointLight(0xffe4c0, 10, 60);
-        warmLight2.position.set(-8, 4, -6);
-        envScene.add(warmLight2);
-        const floor = new THREE.Mesh(
-          new THREE.CircleGeometry(40, 32),
-          new THREE.MeshBasicMaterial({ color: 0x4a3c2e })
-        );
+        const roomGeo = new THREE.BoxGeometry(60, 40, 60);
+        const roomMat = new THREE.MeshBasicMaterial({ color: 0x2e2722, side: THREE.BackSide });
+        envScene.add(new THREE.Mesh(roomGeo, roomMat));
+
+        const floorGeo = new THREE.PlaneGeometry(60, 60);
+        const floorMat = new THREE.MeshBasicMaterial({ color: 0x3d3024 });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -19.9;
+        envScene.add(floor);
+
+        const ceilingLightTex = createSoftboxTexture(128, 128, 1.0, 0.94, 0.82);
+        const ceilingMat = new THREE.MeshBasicMaterial({ map: ceilingLightTex, transparent: true, side: THREE.DoubleSide });
+        for (const [x, z] of [[-12, -12], [12, -12], [-12, 12], [12, 12]]) {
+          const panel = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), ceilingMat);
+          panel.position.set(x, 19.8, z);
+          panel.rotation.x = Math.PI / 2;
+          envScene.add(panel);
+        }
+
+        const windowTex = createSoftboxTexture(256, 256, 0.92, 0.96, 1.0);
+        const windowMat = new THREE.MeshBasicMaterial({ map: windowTex, transparent: true, side: THREE.DoubleSide });
+        const win = new THREE.Mesh(new THREE.PlaneGeometry(26, 32), windowMat);
+        win.position.set(29.8, 2, 0);
+        win.rotation.y = -Math.PI / 2;
+        envScene.add(win);
+      } else if (preset === 'sunset') {
+        const skyTex = createGradientSkyTexture('#1d1738', '#992d5c', '#ff8426');
+        const skyGeo = new THREE.SphereGeometry(60, 32, 24);
+        const skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide });
+        envScene.add(new THREE.Mesh(skyGeo, skyMat));
+
+        const groundGeo = new THREE.CircleGeometry(60, 32);
+        const groundMat = new THREE.MeshBasicMaterial({ color: 0x1f1619 });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = -6;
+        envScene.add(ground);
+
+        const sunTex = createSoftboxTexture(256, 256, 1.0, 0.88, 0.55);
+        const sunMat = new THREE.MeshBasicMaterial({ map: sunTex, transparent: true, side: THREE.DoubleSide });
+        const sun = new THREE.Mesh(new THREE.PlaneGeometry(24, 24), sunMat);
+        sun.position.set(-30, 8, -20);
+        sun.lookAt(0, 0, 0);
+        envScene.add(sun);
+
+        const rimTex = createSoftboxTexture(128, 128, 1.0, 0.55, 0.2);
+        const rimMat = new THREE.MeshBasicMaterial({ map: rimTex, transparent: true, side: THREE.DoubleSide });
+        const rim = new THREE.Mesh(new THREE.PlaneGeometry(40, 10), rimMat);
+        rim.position.set(20, 6, 25);
+        rim.lookAt(0, 0, 0);
+        envScene.add(rim);
+      } else {
+        // Studio (default) — multi-bank softbox setup: key, fill, overhead strip, rear kickers
+        const backdropGeo = new THREE.SphereGeometry(60, 32, 24);
+        const backdropMat = new THREE.MeshBasicMaterial({ color: 0x16191f, side: THREE.BackSide });
+        envScene.add(new THREE.Mesh(backdropGeo, backdropMat));
+
+        const floorGeo = new THREE.CircleGeometry(50, 32);
+        const floorMat = new THREE.MeshBasicMaterial({ color: 0x1e222b });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
         floor.rotation.x = -Math.PI / 2;
         floor.position.y = -8;
         envScene.add(floor);
-      } else if (preset === 'sunset') {
-        envScene.background = new THREE.Color(0xff8a4c);
-        const sky = new THREE.Mesh(
-          new THREE.SphereGeometry(50, 16, 16),
-          new THREE.MeshBasicMaterial({ color: 0xff8a4c, side: THREE.BackSide })
-        );
-        envScene.add(sky);
-        const sun = new THREE.PointLight(0xffb066, 35, 100);
-        sun.position.set(-20, 6, -15);
-        envScene.add(sun);
-        const fill = new THREE.PointLight(0x7a4a8f, 8, 60);
-        fill.position.set(10, 8, 10);
-        envScene.add(fill);
-      } else {
-        // Studio (default) — reuse Three's neutral RoomEnvironment
-        return new RoomEnvironment() as unknown as THREE.Scene;
+
+        const keySoftTex = createSoftboxTexture(256, 256, 1.0, 1.0, 1.0);
+        const keySoftMat = new THREE.MeshBasicMaterial({ map: keySoftTex, transparent: true, side: THREE.DoubleSide });
+        const keyPanel = new THREE.Mesh(new THREE.PlaneGeometry(22, 28), keySoftMat);
+        keyPanel.position.set(20, 22, 20);
+        keyPanel.lookAt(0, 0, 0);
+        envScene.add(keyPanel);
+
+        const fillSoftTex = createSoftboxTexture(256, 256, 0.88, 0.94, 1.0);
+        const fillSoftMat = new THREE.MeshBasicMaterial({ map: fillSoftTex, transparent: true, side: THREE.DoubleSide });
+        const fillPanel = new THREE.Mesh(new THREE.PlaneGeometry(18, 24), fillSoftMat);
+        fillPanel.position.set(-22, 14, 18);
+        fillPanel.lookAt(0, 0, 0);
+        envScene.add(fillPanel);
+
+        const overheadTex = createSoftboxTexture(256, 128, 1.0, 0.98, 0.92);
+        const overheadMat = new THREE.MeshBasicMaterial({ map: overheadTex, transparent: true, side: THREE.DoubleSide });
+        const overheadPanel = new THREE.Mesh(new THREE.PlaneGeometry(36, 10), overheadMat);
+        overheadPanel.position.set(0, 30, -10);
+        overheadPanel.lookAt(0, 0, 0);
+        envScene.add(overheadPanel);
+
+        const kickerTex = createSoftboxTexture(128, 256, 1.0, 0.95, 0.9);
+        const kickerMat = new THREE.MeshBasicMaterial({ map: kickerTex, transparent: true, side: THREE.DoubleSide });
+        const kickerLeft = new THREE.Mesh(new THREE.PlaneGeometry(8, 26), kickerMat);
+        kickerLeft.position.set(-24, 8, -16);
+        kickerLeft.lookAt(0, 0, 0);
+        envScene.add(kickerLeft);
+
+        const kickerRight = new THREE.Mesh(new THREE.PlaneGeometry(8, 26), kickerMat);
+        kickerRight.position.set(24, 8, -16);
+        kickerRight.lookAt(0, 0, 0);
+        envScene.add(kickerRight);
       }
+
       return envScene;
     };
 
+    // Rotates the HDR/PMREM environment map itself, independent of any directional light —
+    // scene.environmentRotation/backgroundRotation are plain Euler properties three.js re-samples
+    // the environment through on every frame, so this is cheap and never needs a texture reload.
+    const applyHdrRotation = () => {
+      if (!sceneRef.current) return;
+      const rad = (((settingsRef.current.hdrRotationDeg || 0) % 360) * Math.PI) / 180;
+      const scene = sceneRef.current as unknown as {
+        environmentRotation?: THREE.Euler;
+        backgroundRotation?: THREE.Euler;
+      };
+      scene.environmentRotation?.set(0, rad, 0);
+      scene.backgroundRotation?.set(0, rad, 0);
+      requestRender();
+    };
+
+    // Environment reflection/IBL strength. Deliberately scoped to scene.environmentIntensity
+    // alone — NOT ambientLightRef (owned by contrastPercent, see the Contrast effect) and NOT
+    // per-material envMapIntensity (which multiplies with scene.environmentIntensity rather than
+    // replacing it, so setting both to the same factor would fade reflections quadratically).
+    const applyEnvironmentIntensity = () => {
+      if (!sceneRef.current) return;
+      const envFactor = Math.max(0, settingsRef.current.envIntensity ?? 100) / 100;
+      (sceneRef.current as unknown as { environmentIntensity?: number }).environmentIntensity = envFactor;
+      requestRender();
+    };
+
+    // Resolves the current environment map in priority order — a user-uploaded custom HDR first,
+    // then a real HDR file matching the selected preset (loaded + PMREM-baked once and cached),
+    // finally the procedural buildEnvironmentScene fallback if no HDR matches or one fails to
+    // load. Real HDR paths are prefixed with BASE_URL so they resolve correctly once deployed
+    // under a sub-path (e.g. GitHub Pages), not just at the site root during local dev.
     const applyEnvironment = () => {
       if (!sceneRef.current || !rendererRef.current) return;
       const preset = settingsRef.current.environmentPreset || 'studio';
-      let tex = envTexturesRef.current[preset];
-      if (!tex) {
+
+      if (customHdriTextureRef.current && settingsRef.current.customHdriFileName) {
+        sceneRef.current.environment = customHdriTextureRef.current;
+        applyHdrRotation();
+        applyEnvironmentIntensity();
+        return;
+      }
+
+      const matchedHdri = hdriListRef.current.find(
+        (h) => h.id.toLowerCase() === preset.toLowerCase() || h.name.toLowerCase() === preset.toLowerCase()
+      );
+      const targetSource = matchedHdri ? matchedHdri.file : 'procedural';
+
+      if (envTexturesRef.current[preset] && envSourceFileRef.current[preset] === targetSource) {
+        sceneRef.current.environment = envTexturesRef.current[preset]!;
+        applyHdrRotation();
+        applyEnvironmentIntensity();
+        return;
+      }
+
+      const applyProceduralFallback = () => {
+        if (!rendererRef.current || !sceneRef.current) return;
         const pmrem = new THREE.PMREMGenerator(rendererRef.current);
         const envScene = buildEnvironmentScene(preset);
-        tex = pmrem.fromScene(envScene as THREE.Scene, 0.04).texture;
+        const tex = pmrem.fromScene(envScene, 0.04).texture;
         pmrem.dispose();
         envTexturesRef.current[preset] = tex;
+        envSourceFileRef.current[preset] = 'procedural';
+        sceneRef.current.environment = tex;
+        applyHdrRotation();
+        applyEnvironmentIntensity();
+      };
+
+      if (matchedHdri && matchedHdri.file) {
+        setIsHdriLoading(true);
+        const loader = new RGBELoader();
+        loader.load(
+          `${import.meta.env.BASE_URL}${matchedHdri.file}`,
+          (hdrTexture) => {
+            setIsHdriLoading(false);
+            if (!rendererRef.current || !sceneRef.current) {
+              hdrTexture.dispose();
+              return;
+            }
+            hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+            const pmrem = new THREE.PMREMGenerator(rendererRef.current);
+            pmrem.compileEquirectangularShader();
+            const envMap = pmrem.fromEquirectangular(hdrTexture).texture;
+            hdrTexture.dispose();
+            pmrem.dispose();
+            envTexturesRef.current[preset] = envMap;
+            envSourceFileRef.current[preset] = matchedHdri.file;
+            if (settingsRef.current.environmentPreset === preset && !settingsRef.current.customHdriFileName) {
+              sceneRef.current.environment = envMap;
+              applyHdrRotation();
+              applyEnvironmentIntensity();
+            }
+          },
+          undefined,
+          (err) => {
+            console.warn(`Could not load HDR from ${matchedHdri.file}, falling back to procedural:`, err);
+            setIsHdriLoading(false);
+            applyProceduralFallback();
+          }
+        );
+        return;
       }
-      sceneRef.current.environment = tex;
+
+      applyProceduralFallback();
     };
 
     // Keep post-processing passes (SSAO, FXAA/SMAA) in sync with settings
@@ -1849,10 +2159,33 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       );
     };
 
+    // Click-to-select a part: draws a blue bounding-box outline around it and notifies the
+    // parent (Sidebar highlights the matching Loaded Meshes row). Passing null (or clicking empty
+    // space / the same part again) clears the selection.
+    const selectPart = (index: number | null) => {
+      selectedPartIndexRef.current = index;
+      onSelectPart?.(index);
+      if (selectionHelperRef.current) {
+        const part = index !== null ? batchPartsRef.current[index] : null;
+        if (part && part.object.visible) {
+          selectionHelperRef.current.setFromObject(part.object);
+          selectionHelperRef.current.visible = true;
+        } else {
+          selectionHelperRef.current.visible = false;
+        }
+      }
+      requestRender();
+    };
+
     const togglePartVisibility = (index: number) => {
       const part = batchPartsRef.current[index];
       if (!part) return;
       part.object.visible = !part.object.visible;
+      if (!part.object.visible && selectedPartIndexRef.current === index) {
+        selectPart(null);
+      } else if (part.object.visible && selectedPartIndexRef.current === index) {
+        selectPart(index);
+      }
       notifyPartsChanged();
       requestRender();
     };
@@ -1929,6 +2262,26 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       recenterView();
     };
 
+    // H: toggle visibility of whichever part is currently selected (click-to-select), or failing
+    // that whatever's under the pointer right now — same hover-raycast the I key uses.
+    const toggleSelectedOrHoveredVisibility = () => {
+      if (selectedPartIndexRef.current !== null) {
+        togglePartVisibility(selectedPartIndexRef.current);
+        return;
+      }
+      if (!lastPointerNDCRef.current || !activeCameraRef.current || !currentModelRef.current) return;
+      isolateRaycasterRef.current.setFromCamera(
+        lastPointerNDCRef.current as THREE.Vector2,
+        activeCameraRef.current
+      );
+      const hits = isolateRaycasterRef.current.intersectObject(currentModelRef.current, true);
+      const hit = hits.find((h) => h.object.visible);
+      if (!hit) return;
+      const hitIndex = getPartIndexFromObject(hit.object);
+      if (hitIndex === null) return;
+      togglePartVisibility(hitIndex);
+    };
+
     const collectMeshMaterials = (obj: THREE.Object3D, into: Set<THREE.Material>) => {
       obj.traverse((child) => {
         const mesh = child as THREE.Mesh;
@@ -1947,6 +2300,14 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       // pointing at indices that no longer match after the splice below — exit cleanly first
       // (the sidebar already disables delete while isolated; this is a defensive backstop).
       if (isolatedPartIndexRef.current !== null) exitIsolate();
+
+      // Same reasoning for the click-to-select index: clear it if the deleted part was selected,
+      // or shift it down if a part before it in the list is being removed.
+      if (selectedPartIndexRef.current === index) {
+        selectPart(null);
+      } else if (selectedPartIndexRef.current !== null && selectedPartIndexRef.current > index) {
+        selectPart(selectedPartIndexRef.current - 1);
+      }
 
       // Multiple meshes/parts commonly reference the exact same material (e.g. every part of
       // the demo figurine shares one body material) — only dispose materials this part actually
@@ -1980,6 +2341,19 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
       notifyPartsChanged();
       requestRender();
+    };
+
+    // Purges every currently-hidden part from the scene/memory in one action — each removal goes
+    // through deletePart so isolate-guarding, material cleanup, and bounds recalc stay consistent
+    // with a single manual delete. Runs highest-index-first so earlier splices don't shift the
+    // indices still queued for removal.
+    const deleteHiddenParts = () => {
+      const hiddenIndices = batchPartsRef.current
+        .map((part, i) => (!part.object.visible ? i : -1))
+        .filter((i) => i !== -1);
+      for (let i = hiddenIndices.length - 1; i >= 0; i--) {
+        deletePart(hiddenIndices[i]);
+      }
     };
 
     // Load sample default model
@@ -2380,6 +2754,40 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     };
 
     // Turntable Video Exporter
+    // Restores the live-view resolution/state after either export path finishes (or bails out) —
+    // shared so Path A (WebCodecs) and Path B (MediaRecorder) can't drift into inconsistent
+    // cleanup as they're each edited over time.
+    const restoreLiveViewAfterExport = (origW: number, origH: number, cam: THREE.Camera) => {
+      if (!rendererRef.current) return;
+      rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      rendererRef.current.setSize(origW, origH, true);
+      if (composerRef.current) composerRef.current.setSize(origW, origH);
+      if (cameraPerspRef.current) {
+        cameraPerspRef.current.aspect = origW / origH;
+        cameraPerspRef.current.updateProjectionMatrix();
+      }
+      updateOrthoFrustum();
+      isExportingRef.current = false;
+      if (controlsRef.current) controlsRef.current.enabled = true;
+      if (settingsRef.current.isOrtho && settingsRef.current.showGrid) updateGrid();
+      updateLights(cam);
+      requestRender();
+    };
+
+    // Turntable video export, with two paths:
+    //
+    // Path A — WebCodecs VideoEncoder + mp4-muxer, used whenever format is 'mp4' and the browser
+    // supports it (all Chromium browsers — the large majority of usage). MediaRecorder's own
+    // 'video/mp4' output is unreliable: MediaRecorder.isTypeSupported('video/mp4') returns false
+    // in stock Chrome/Edge entirely (silently falling back to webm despite the button saying
+    // "Export MP4"), and even where a browser does report mp4 support, MediaRecorder-produced
+    // containers can be poorly structured (e.g. moov placement) and fail to play in stricter
+    // players. Path A sidesteps all of that by manually encoding each frame into a real,
+    // standards-compliant MP4 container itself — not dependent on what the browser's recorder
+    // happens to support.
+    //
+    // Path B — MediaRecorder, used for webm, and as the fallback for browsers without WebCodecs
+    // (Firefox, older Safari) or where Path A throws for any reason.
     const exportTurntableVideo = async (
       format: 'mp4' | 'webm',
       onComplete: (blob: Blob, fileName: string) => void,
@@ -2392,13 +2800,136 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       isExportingRef.current = true;
       if (controlsRef.current) controlsRef.current.enabled = false;
 
-      onProgress('Testing encoder...');
+      onProgress('Initializing video encoder...');
       recalculateBounds();
 
+      // Temporarily render at a higher fixed resolution for a cleaner, less compressed-looking
+      // capture than whatever the on-screen canvas size happens to be. H.264 encoders (Path A,
+      // and most MediaRecorder mp4/h264 backends too) strictly require even width/height.
+      const origW = containerRef.current?.clientWidth || canvasRef.current.width;
+      const origH = containerRef.current?.clientHeight || canvasRef.current.height;
+      const aspect = origW / origH;
+      const targetLongEdge = 1600;
+      let exportW = Math.round(aspect >= 1 ? targetLongEdge : targetLongEdge * aspect);
+      let exportH = Math.round(aspect >= 1 ? targetLongEdge / aspect : targetLongEdge);
+      if (exportW % 2 !== 0) exportW += 1;
+      if (exportH % 2 !== 0) exportH += 1;
+      rendererRef.current.setPixelRatio(1);
+      rendererRef.current.setSize(exportW, exportH, true);
+      if (composerRef.current) composerRef.current.setSize(exportW, exportH);
+      if (cameraPerspRef.current) {
+        cameraPerspRef.current.aspect = exportW / exportH;
+        cameraPerspRef.current.updateProjectionMatrix();
+      }
+      updateOrthoFrustum();
+
+      // Rotation math shared by both paths — identical to the live turntable loop and the
+      // export's own preview, just driven by a frame index (Path A) or wall-clock elapsed time
+      // (Path B) instead of requestAnimationFrame deltas.
+      const fps = 30;
+      const speedSetting = settingsRef.current.turntableSpeed || 'normal';
+      const durationMs = speedSetting === 'slow' ? 8000 : speedSetting === 'fast' ? 2000 : 4000;
+      const totalFrames = Math.round((durationMs / 1000) * fps);
+      const dirSign = (settingsRef.current.turntableDirection || 'cw') === 'ccw' ? -1 : 1;
+      const useEasing = !!settingsRef.current.videoEasing;
+      const cam = activeCameraRef.current;
+      const target = controlsRef.current?.target || new THREE.Vector3();
+      const relX0 = cam.position.x - target.x;
+      const relZ0 = cam.position.z - target.z;
+      const radius = Math.sqrt(relX0 ** 2 + relZ0 ** 2) || modelRadiusRef.current * 3.0;
+      const camY = cam.position.y;
+      const initialAngle = Math.atan2(relX0, relZ0);
+      const easeProgress = (progress: number) =>
+        useEasing
+          ? progress < 0.5
+            ? 4 * progress * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 3) / 2
+          : progress;
+      const cleanName = (loadedFileName || 'model').replace(/\.[^/.]+$/, '');
+
+      // Path A: real MP4 via WebCodecs + mp4-muxer
+      if (format === 'mp4' && typeof VideoEncoder !== 'undefined') {
+        let supportedCodec: string | null = null;
+        for (const codec of ['avc1.42001f', 'avc1.4d002a', 'avc1.64002a', 'avc1.42E01E']) {
+          try {
+            const res = await VideoEncoder.isConfigSupported({
+              codec,
+              width: exportW,
+              height: exportH,
+              bitrate: 12_000_000,
+              framerate: fps,
+            });
+            if (res?.supported) {
+              supportedCodec = codec;
+              break;
+            }
+          } catch {
+            // try the next candidate
+          }
+        }
+
+        if (supportedCodec) {
+          try {
+            onProgress('Rendering MP4: 0%...');
+            const muxer = new Muxer({
+              target: new ArrayBufferTarget(),
+              video: { codec: 'avc', width: exportW, height: exportH },
+              fastStart: 'in-memory',
+            });
+
+            let encoderError: Error | null = null;
+            const encoder = new VideoEncoder({
+              output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+              error: (err) => {
+                console.error('VideoEncoder error', err);
+                encoderError = err;
+              },
+            });
+            encoder.configure({ codec: supportedCodec, width: exportW, height: exportH, bitrate: 12_000_000, framerate: fps });
+
+            for (let i = 0; i < totalFrames; i++) {
+              if (encoderError) throw encoderError;
+              const progress = i / totalFrames;
+              const angle = initialAngle + dirSign * (easeProgress(progress) * Math.PI * 2);
+
+              cam.position.x = target.x + radius * Math.sin(angle);
+              cam.position.z = target.z + radius * Math.cos(angle);
+              cam.position.y = camY;
+              cam.lookAt(target);
+
+              updateLights(cam);
+              renderFrame(cam, false);
+
+              const timestampMicros = Math.round(i * (1_000_000 / fps));
+              const frame = new VideoFrame(canvasRef.current, { timestamp: timestampMicros });
+              encoder.encode(frame, { keyFrame: i % 30 === 0 });
+              frame.close();
+
+              onProgress(`Rendering MP4: ${Math.round(progress * 100)}% (${i + 1}/${totalFrames})...`);
+              if (i % 6 === 0) await new Promise((r) => requestAnimationFrame(r));
+            }
+
+            onProgress('Finalizing MP4...');
+            await encoder.flush();
+            muxer.finalize();
+            encoder.close();
+
+            const mp4Blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+            onComplete(mp4Blob, `${cleanName}_Turnaround.mp4`);
+            restoreLiveViewAfterExport(origW, origH, cam);
+            return;
+          } catch (webCodecsErr) {
+            console.warn('WebCodecs MP4 export failed, falling back to MediaRecorder:', webCodecsErr);
+          }
+        }
+      }
+
+      // Path B: MediaRecorder fallback (webm, or mp4 on browsers without usable WebCodecs)
+      onProgress('Testing encoder...');
       let selectedMimeType = getSupportedVideoMimeType(format);
+      if (!selectedMimeType) selectedMimeType = getSupportedVideoMimeType('webm');
       if (!selectedMimeType) {
-        isExportingRef.current = false;
-        if (controlsRef.current) controlsRef.current.enabled = true;
+        restoreLiveViewAfterExport(origW, origH, cam);
         throw new Error('Video recording is not supported in this browser.');
       }
 
@@ -2408,23 +2939,6 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
 
       onProgress('Recording 360° turntable...');
-
-      // Temporarily render at a higher fixed resolution for a cleaner, less compressed-looking
-      // capture than whatever the on-screen canvas size happens to be.
-      const origW = containerRef.current?.clientWidth || canvasRef.current.width;
-      const origH = containerRef.current?.clientHeight || canvasRef.current.height;
-      const aspect = origW / origH;
-      const targetLongEdge = 1600;
-      const exportW = Math.round(aspect >= 1 ? targetLongEdge : targetLongEdge * aspect);
-      const exportH = Math.round(aspect >= 1 ? targetLongEdge / aspect : targetLongEdge);
-      rendererRef.current.setPixelRatio(1);
-      rendererRef.current.setSize(exportW, exportH, true);
-      if (composerRef.current) composerRef.current.setSize(exportW, exportH);
-      if (cameraPerspRef.current) {
-        cameraPerspRef.current.aspect = exportW / exportH;
-        cameraPerspRef.current.updateProjectionMatrix();
-      }
-      updateOrthoFrustum();
 
       const stream = canvasRef.current.captureStream(30);
       let recorder: MediaRecorder;
@@ -2452,9 +2966,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
             }
             const isMp4 = selectedMimeType.includes('mp4');
             const ext = isMp4 ? 'mp4' : 'webm';
-            const cleanName = (loadedFileName || 'model').replace(/\.[^/.]+$/, '');
-            const outName = `${cleanName}_Turnaround.${ext}`;
-            onComplete(blob, outName);
+            onComplete(blob, `${cleanName}_Turnaround.${ext}`);
             resolve();
           } catch (err) {
             reject(err);
@@ -2465,22 +2977,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       recorder.start(100);
 
-      const durationMs = 4000;
-      const cam = activeCameraRef.current;
-      const target = controlsRef.current?.target || new THREE.Vector3();
-      const relX0 = cam.position.x - target.x;
-      const relZ0 = cam.position.z - target.z;
-      const radius = Math.sqrt(relX0 ** 2 + relZ0 ** 2) || modelRadiusRef.current * 3.0;
-      const camY = cam.position.y;
-      const initialAngle = Math.atan2(relX0, relZ0);
       const startTime = performance.now();
-
       await new Promise<void>((resolve) => {
         const renderStep = (now: number) => {
           if (!rendererRef.current || !sceneRef.current) return;
           const elapsed = now - startTime;
           const progress = Math.min(elapsed / durationMs, 1.0);
-          const angle = initialAngle + progress * Math.PI * 2;
+          const angle = initialAngle + dirSign * (easeProgress(progress) * Math.PI * 2);
 
           cam.position.x = target.x + radius * Math.sin(angle);
           cam.position.z = target.z + radius * Math.cos(angle);
@@ -2503,21 +3006,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       if (recorder.state !== 'inactive') recorder.stop();
       await recordPromise;
 
-      // Restore the live-view resolution
-      rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-      rendererRef.current.setSize(origW, origH, true);
-      if (composerRef.current) composerRef.current.setSize(origW, origH);
-      if (cameraPerspRef.current) {
-        cameraPerspRef.current.aspect = origW / origH;
-        cameraPerspRef.current.updateProjectionMatrix();
-      }
-      updateOrthoFrustum();
-
-      isExportingRef.current = false;
-      if (controlsRef.current) controlsRef.current.enabled = true;
-      if (settingsRef.current.isOrtho && settingsRef.current.showGrid) updateGrid();
-      updateLights(cam);
-      requestRender();
+      restoreLiveViewAfterExport(origW, origH, cam);
     };
 
     useImperativeHandle(ref, () => ({
@@ -2531,8 +3020,19 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       updateDimension,
       togglePartVisibility,
       deletePart,
+      deleteHiddenParts,
+      selectPart,
+      toggleSelectedOrHoveredVisibility,
       toggleIsolateHoveredPart,
     }));
+
+    // Sync external selectedPartIndex (e.g. a click on the Loaded Meshes list) into the
+    // internal ref/BoxHelper state that drives the viewport highlight.
+    useEffect(() => {
+      if (selectedPartIndex !== undefined && selectedPartIndex !== selectedPartIndexRef.current) {
+        selectPart(selectedPartIndex);
+      }
+    }, [selectedPartIndex]);
 
     // Initialize Three.js scene
     useEffect(() => {
@@ -2600,13 +3100,48 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       const viewHelper = new ViewHelper(activeCamera, renderer.domElement);
       viewHelperRef.current = viewHelper;
 
+      // Click-to-select outline — a plain BoxHelper re-fit to the clicked part each time
+      // selectPart runs; hidden until something is actually selected.
+      const selectionHelper = new THREE.BoxHelper(new THREE.Mesh(), 0x38bdf8);
+      selectionHelper.visible = false;
+      scene.add(selectionHelper);
+      selectionHelperRef.current = selectionHelper;
+
       const handlePointerDown = (event: PointerEvent) => {
+        pointerDownPosRef.current = { x: event.clientX, y: event.clientY };
         if (viewHelperRef.current && !isFullscreenRef.current) {
           viewHelperRef.current.handleClick(event);
           requestRender();
         }
       };
       canvas.addEventListener('pointerdown', handlePointerDown);
+
+      // Click-to-select: a pointerup within a small radius of the matching pointerdown counts as
+      // a click (not a drag-orbit release); it raycasts against the loaded model and selects
+      // whichever tracked part owns the hit mesh, toggling off on a second click of the same part.
+      const handlePointerUp = (event: PointerEvent) => {
+        const dx = Math.abs(event.clientX - pointerDownPosRef.current.x);
+        const dy = Math.abs(event.clientY - pointerDownPosRef.current.y);
+        if (dx > 6 || dy > 6) return;
+        if (!activeCameraRef.current || !currentModelRef.current) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const ndc = {
+          x: ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          y: -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        };
+        isolateRaycasterRef.current.setFromCamera(ndc as THREE.Vector2, activeCameraRef.current);
+        const hits = isolateRaycasterRef.current.intersectObjects(currentModelRef.current.children, true);
+        const hit = hits.find((h) => h.object.visible);
+
+        if (hit) {
+          const matchedIdx = getPartIndexFromObject(hit.object);
+          selectPart(matchedIdx !== null && selectedPartIndexRef.current !== matchedIdx ? matchedIdx : null);
+        } else {
+          selectPart(null);
+        }
+      };
+      canvas.addEventListener('pointerup', handlePointerUp);
 
       const handlePointerMove = (event: PointerEvent) => {
         const rect = canvas.getBoundingClientRect();
@@ -2751,7 +3286,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         const cameraMoved = controls.update();
 
         if (isTurntableActiveRef.current && activeCameraRef.current && controlsRef.current) {
-          const speed = 0.008;
+          const speedSettingLive = settingsRef.current.turntableSpeed || 'normal';
+          const speedMultLive =
+            speedSettingLive === 'slow' ? 0.5 : speedSettingLive === 'fast' ? 2.0 : 1.0;
+          const dirSignLive = (settingsRef.current.turntableDirection || 'cw') === 'ccw' ? -1 : 1;
+          const speed = 0.008 * speedMultLive * dirSignLive;
           const cam = activeCameraRef.current;
           const target = controlsRef.current.target;
           // Rotate relative to the orbit target, not world origin — recenterView/snapView can
@@ -2791,6 +3330,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         cancelAnimationFrame(animationFrameId);
         resizeObserver.disconnect();
         canvas.removeEventListener('pointerdown', handlePointerDown);
+        canvas.removeEventListener('pointerup', handlePointerUp);
         canvas.removeEventListener('pointermove', handlePointerMove);
         cleanupScene();
         composerRef.current?.dispose();
@@ -2916,11 +3456,26 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       requestRender();
     }, [isFullscreen]);
 
-    // Environment preset (PMREM lookups are cached per-preset, so this is cheap after first use)
+    // Environment preset / custom HDR (PMREM lookups are cached per-preset, so this is cheap
+    // after first use — real reload work only happens the first time a given preset is selected).
     useEffect(() => {
       applyEnvironment();
       requestRender();
-    }, [settings.environmentPreset]);
+    }, [settings.environmentPreset, settings.customHdriFileName]);
+
+    // HDR rotation — deliberately its OWN effect, never bundled into the reload effect above.
+    // Rotation is a cheap Euler update on the already-loaded texture (see applyHdrRotation), not
+    // a reason to re-check the cache or re-trigger a network load, and — this is the actual fix
+    // for the reported "rotation doesn't update" bug — putting it in its own effect means its own
+    // dependency can never accidentally be left out of a longer, unrelated list.
+    useEffect(() => {
+      applyHdrRotation();
+    }, [settings.hdrRotationDeg]);
+
+    // Environment reflection/IBL intensity — same reasoning: cheap scalar update, own effect.
+    useEffect(() => {
+      applyEnvironmentIntensity();
+    }, [settings.envIntensity]);
 
     // Post-processing (SSAO / antialiasing)
     useEffect(() => {
@@ -2982,6 +3537,67 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           loadModelFromFile(e.dataTransfer.files[0]);
         }
       }
+    };
+
+    // Accepts .hdr, .exr, or a plain equirectangular panorama image — whichever the user has to
+    // hand — and PMREM-bakes it exactly like a manifest HDR, then makes it the active environment.
+    const handleUploadHdri = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file || !rendererRef.current) return;
+      const fileName = file.name;
+      const ext = fileName.split('.').pop()?.toLowerCase();
+      const objectUrl = URL.createObjectURL(file);
+
+      const onTextureReady = (texture: THREE.Texture) => {
+        if (!rendererRef.current || !sceneRef.current) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        const pmrem = new THREE.PMREMGenerator(rendererRef.current);
+        const envMap = pmrem.fromEquirectangular(texture).texture;
+        texture.dispose();
+        pmrem.dispose();
+        URL.revokeObjectURL(objectUrl);
+
+        if (customHdriTextureRef.current) customHdriTextureRef.current.dispose();
+        customHdriTextureRef.current = envMap;
+        onUpdateSettings({ customHdriFileName: fileName });
+      };
+
+      if (ext === 'hdr') {
+        new RGBELoader().load(objectUrl, onTextureReady, undefined, (err) => {
+          console.error('Failed to load HDR file', err);
+          URL.revokeObjectURL(objectUrl);
+        });
+      } else if (ext === 'exr') {
+        new EXRLoader().load(objectUrl, onTextureReady, undefined, (err) => {
+          console.error('Failed to load EXR file', err);
+          URL.revokeObjectURL(objectUrl);
+        });
+      } else {
+        new THREE.TextureLoader().load(
+          objectUrl,
+          (tex) => {
+            tex.mapping = THREE.EquirectangularReflectionMapping;
+            tex.colorSpace = THREE.SRGBColorSpace;
+            onTextureReady(tex);
+          },
+          undefined,
+          (err) => {
+            console.error('Failed to load image panorama', err);
+            URL.revokeObjectURL(objectUrl);
+          }
+        );
+      }
+      e.target.value = '';
+    };
+
+    const handleClearCustomHdri = () => {
+      if (customHdriTextureRef.current) {
+        customHdriTextureRef.current.dispose();
+        customHdriTextureRef.current = null;
+      }
+      onUpdateSettings({ customHdriFileName: undefined });
     };
 
     const railBtnClass = (isOn: boolean) =>
@@ -3271,18 +3887,142 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                 <Globe className="w-4 h-4" />
               </button>
               {openRailPanel === 'env' && (
-                <div className={railPanelClass}>
+                <div className={`${railPanelClass} w-64 max-h-[85vh] overflow-y-auto pr-1`}>
                   {railPanelHeader('Environment')}
-                  <select
-                    value={settings.environmentPreset}
-                    onChange={(e) => onUpdateSettings({ environmentPreset: e.target.value as any })}
-                    className="w-full py-1.5 px-2 rounded-md border text-xs outline-hidden bg-[#1e293b] border-slate-600 text-white"
-                  >
-                    <option value="studio">Studio</option>
-                    <option value="outdoor">Outdoor</option>
-                    <option value="interior">Interior</option>
-                    <option value="sunset">Sunset</option>
-                  </select>
+
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        HDRI Environment
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setIsHdriLoading(true);
+                          envTexturesRef.current = {};
+                          envSourceFileRef.current = {};
+                          await loadHdriManifest();
+                          applyEnvironment();
+                          setIsHdriLoading(false);
+                        }}
+                        className="text-[10px] text-sky-400 hover:text-sky-300 flex items-center gap-1 cursor-pointer transition-colors"
+                        title="Reload public/hdri/manifest.json and re-apply the environment"
+                      >
+                        <RefreshCw className={`w-2.5 h-2.5 ${isHdriLoading ? 'animate-spin' : ''}`} />
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+
+                    <select
+                      value={settings.customHdriFileName ? 'custom_upload' : settings.environmentPreset}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === 'custom_upload') return;
+                        if (settings.customHdriFileName) handleClearCustomHdri();
+                        onUpdateSettings({ environmentPreset: val });
+                      }}
+                      className="w-full py-1.5 px-2 rounded-md border text-xs outline-hidden bg-[#1e293b] border-slate-600 text-white cursor-pointer"
+                    >
+                      {settings.customHdriFileName && (
+                        <option value="custom_upload">★ Custom: {settings.customHdriFileName}</option>
+                      )}
+                      {(['Studio', 'Outdoor', 'Interior'] as const).map((category) => {
+                        const items = deduplicateHdris(hdriList).filter(
+                          (h) => (h.category || 'Studio').toLowerCase() === category.toLowerCase()
+                        );
+                        if (items.length === 0) return null;
+                        return (
+                          <optgroup key={category} label={`${category} HDRIs`}>
+                            {items.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        );
+                      })}
+                    </select>
+
+                    <div className="flex items-center justify-between text-[9px] text-slate-400 px-0.5">
+                      <span>{deduplicateHdris(hdriList).length} HDRs ready</span>
+                      {isHdriLoading && <span className="text-sky-400">Loading…</span>}
+                    </div>
+                  </div>
+
+                  {/* Custom HDRI Upload / Clear */}
+                  <div className="flex flex-col gap-1.5 pt-2 border-t border-slate-700 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-sky-400 uppercase tracking-wider">
+                        Custom HDRI Map
+                      </span>
+                      {settings.customHdriFileName && (
+                        <button
+                          type="button"
+                          onClick={handleClearCustomHdri}
+                          className="text-[10px] text-rose-400 hover:underline cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                    {settings.customHdriFileName ? (
+                      <div
+                        className="px-2 py-1 rounded bg-sky-950/60 border border-sky-500/40 text-sky-300 text-[11px] font-mono truncate"
+                        title={settings.customHdriFileName}
+                      >
+                        ✓ Active: {settings.customHdriFileName}
+                      </div>
+                    ) : (
+                      <label className="flex items-center justify-center gap-1.5 py-1 px-2 rounded-md border border-dashed border-slate-600 hover:border-sky-500 bg-slate-800/40 hover:bg-slate-800 text-[11px] text-slate-300 cursor-pointer transition-colors">
+                        <Upload className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Browse .HDR / .EXR</span>
+                        <input type="file" accept=".hdr,.exr,.png,.jpg,.jpeg" onChange={handleUploadHdri} className="hidden" />
+                      </label>
+                    )}
+
+                    <a
+                      href="https://polyhaven.com/hdris"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-1.5 py-1 px-2 rounded-md border border-slate-700 hover:border-sky-500/50 bg-slate-800/30 hover:bg-slate-800 text-[11px] text-sky-400 hover:text-sky-300 transition-colors"
+                      title="Open Poly Haven HDRIs library in a new browser window"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Browse free HDRs on Poly Haven</span>
+                    </a>
+                  </div>
+
+                  {/* Environment Intensity */}
+                  <div className="flex flex-col gap-1 pt-2 border-t border-slate-700 text-xs">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="font-medium">Environment</span>
+                      <span className="font-mono text-sky-400">{settings.envIntensity}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="300"
+                      value={settings.envIntensity}
+                      onChange={(e) => onUpdateSettings({ envIntensity: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Rotate HDR — independent of the key/fill directional lights */}
+                  <div className="flex flex-col gap-1 pt-2 border-t border-slate-700 text-xs">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="font-medium">Rotate HDR</span>
+                      <span className="font-mono text-sky-400">{settings.hdrRotationDeg ?? 0}°</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="360"
+                      value={settings.hdrRotationDeg ?? 0}
+                      onChange={(e) => onUpdateSettings({ hdrRotationDeg: Number(e.target.value) })}
+                      className="w-full accent-sky-500 cursor-pointer"
+                    />
+                  </div>
                 </div>
               )}
             </div>
@@ -3355,6 +4095,13 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                   {(['x', 'y', 'z'] as const).map((axis) => {
                     const label = axis === 'x' ? 'Left / Right' : axis === 'y' ? 'Top / Bottom' : 'Front / Back';
                     const c = settings.clipping[axis];
+                    // Offset is stored as % of the model's own bounding-box extent on this axis
+                    // (scale-independent — stays correctly placed whether the model is 1" or
+                    // 100" across), with offsetInches kept alongside purely for display.
+                    const axisSizeInches = axis === 'x' ? dimensions.widthInches : axis === 'y' ? dimensions.heightInches : dimensions.depthInches;
+                    const halfInches = Math.max((axisSizeInches || 1) * 0.5, 0.001);
+                    const pct = c.offsetPercent ?? 0;
+                    const curInches = (pct / 100) * halfInches;
                     return (
                       <div key={axis} className="flex flex-col gap-1">
                         <label className="flex items-center justify-between cursor-pointer">
@@ -3371,36 +4118,70 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                           />
                         </label>
                         {c.enabled && (
-                          <div className="flex items-center gap-2 pl-2 border-l-2 border-slate-600">
-                            <input
-                              type="range"
-                              min="-10"
-                              max="10"
-                              step="0.05"
-                              value={c.offsetInches}
-                              onChange={(e) =>
-                                onUpdateSettings({
-                                  clipping: {
-                                    ...settings.clipping,
-                                    [axis]: { ...c, offsetInches: Number(e.target.value) },
-                                  },
-                                })
-                              }
-                              className="flex-1 accent-sky-500 cursor-pointer"
-                            />
-                            <button
-                              onClick={() =>
-                                onUpdateSettings({
-                                  clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
-                                })
-                              }
-                              className={`text-xs font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
-                                c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
-                              }`}
-                              title="Flip which side is cut away"
-                            >
-                              Flip
-                            </button>
+                          <div className="flex flex-col gap-1 pl-2 border-l-2 border-slate-600">
+                            <div className="flex items-center justify-between text-[10px] text-slate-400">
+                              <span className="font-mono">
+                                {pct === 0 ? (
+                                  <span className="text-emerald-400 font-bold">0% (Center)</span>
+                                ) : (
+                                  <span className="text-sky-300">
+                                    {pct > 0 ? `+${pct}%` : `${pct}%`} ({curInches >= 0 ? `+${curInches.toFixed(2)}` : curInches.toFixed(2)}")
+                                  </span>
+                                )}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({
+                                    clipping: { ...settings.clipping, [axis]: { ...c, offsetPercent: 0, offsetInches: 0 } },
+                                  })
+                                }
+                                className="text-[10px] text-sky-400 hover:text-sky-300 hover:underline cursor-pointer"
+                                title="Reset plane to exact model center (0%)"
+                              >
+                                Center
+                              </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="range"
+                                min="-100"
+                                max="100"
+                                step="1"
+                                value={pct}
+                                onChange={(e) => {
+                                  let val = Number(e.target.value);
+                                  if (Math.abs(val) <= 3) val = 0; // magnetic snap to center
+                                  const inchVal = Number(((val / 100) * halfInches).toFixed(3));
+                                  onUpdateSettings({
+                                    clipping: {
+                                      ...settings.clipping,
+                                      [axis]: { ...c, offsetPercent: val, offsetInches: inchVal },
+                                    },
+                                  });
+                                }}
+                                onDoubleClick={() =>
+                                  onUpdateSettings({
+                                    clipping: { ...settings.clipping, [axis]: { ...c, offsetPercent: 0, offsetInches: 0 } },
+                                  })
+                                }
+                                className="flex-1 accent-sky-500 cursor-pointer"
+                                title="Drag -100% to +100% of the model's bounding box. Double-click to snap to center."
+                              />
+                              <button
+                                onClick={() =>
+                                  onUpdateSettings({
+                                    clipping: { ...settings.clipping, [axis]: { ...c, flip: !c.flip } },
+                                  })
+                                }
+                                className={`text-xs font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
+                                  c.flip ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300'
+                                }`}
+                                title="Flip which side is cut away"
+                              >
+                                Flip
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
