@@ -58,7 +58,7 @@ export default function App() {
     sketchHighlightColorHex: '#e2e8f0',
     sketchShadowColorHex: '#334155',
 
-    environmentPreset: 'studio',
+    environmentPreset: 'none',
     hdrRotationDeg: 0,
     envIntensity: 100,
 
