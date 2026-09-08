@@ -338,6 +338,18 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
     // wherever empty space the part has since moved to. Cleared in cleanupScene — a plain Map
     // holds strong references to its keys, so old parts would otherwise never be released.
     const batchPartPlanesRef = useRef<Map<THREE.Object3D, THREE.Plane[]>>(new Map());
+    // Per-mesh exclusive material clones used only while per-part clipping is active. Lookdev
+    // materials (materialsMap.current.grey etc.) are ONE shared THREE.Material instance reused
+    // across every mesh in the whole app — clippingPlanes lives on the material, not the mesh, so
+    // assigning a different per-part plane array to a shared material per part just means
+    // whichever part is processed last in the loop "wins" and every other part sharing that
+    // material renders with a clip plane meant for a different part entirely (looks exactly like
+    // parts drifting through/getting re-cut by a moving plane). Cloning once per mesh here gives
+    // each part's mesh its own material to carry its own clippingPlanes without disturbing
+    // siblings. Cleared/disposed in cleanupScene.
+    const meshClipMaterialsRef = useRef<Map<THREE.Mesh, { sources: THREE.Material[]; clones: THREE.Material[] }>>(
+      new Map()
+    );
 
     // Matcap texture (procedurally generated zebra-stripe matcap)
     const matcapZebraTextureRef = useRef<THREE.Texture | null>(null);
@@ -615,6 +627,8 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       batchPartsRef.current = [];
       batchGroupCenterRef.current.set(0, 0, 0);
       batchPartPlanesRef.current.clear();
+      meshClipMaterialsRef.current.forEach((entry) => entry.clones.forEach((c) => c.dispose()));
+      meshClipMaterialsRef.current.clear();
       if (selectedPartIndexRef.current !== null) selectPart(null);
       if (thicknessMaterialRef.current) {
         thicknessMaterialRef.current.uniforms.uIsReady.value = 0.0;
@@ -1295,6 +1309,32 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
       }
     };
 
+    // Returns material instance(s) this specific mesh can freely set clippingPlanes on without
+    // affecting any other mesh — cloning once per mesh (cached, reused across calls as long as
+    // the mesh's underlying source material(s) haven't changed) even when the mesh's current
+    // material is already exclusive to it, since it's cheap and keeps this function's contract
+    // simple: whatever it returns is always safe to mutate per-mesh.
+    const getExclusiveClipMaterials = (mesh: THREE.Mesh, sources: THREE.Material[]): THREE.Material[] => {
+      const cached = meshClipMaterialsRef.current.get(mesh);
+      const sameSource =
+        cached && cached.sources.length === sources.length && cached.sources.every((s, i) => s === sources[i]);
+      if (sameSource) return cached!.clones;
+      if (cached) cached.clones.forEach((c) => c.dispose());
+      const clones = sources.map((s) => s.clone());
+      meshClipMaterialsRef.current.set(mesh, { sources, clones });
+      return clones;
+    };
+
+    // Restores a mesh to its shared source material(s) (undoing getExclusiveClipMaterials) —
+    // used once per-part clipping is no longer active for this mesh, so it goes back to sharing
+    // the same material instance as its siblings (matching what applyMaterialAndShadows assigns)
+    // instead of drifting on a frozen clone that stops picking up live material-property edits.
+    const revertExclusiveClipMaterial = (mesh: THREE.Mesh) => {
+      const cached = meshClipMaterialsRef.current.get(mesh);
+      if (!cached) return;
+      mesh.material = cached.sources.length === 1 ? cached.sources[0] : cached.sources;
+    };
+
     const updateClippingPlanes = () => {
       const { clipping } = settingsRef.current;
       const inchesToUnits = 1 / getConversionToInches();
@@ -1374,8 +1414,16 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
           part.object.traverse((child) => {
             if ((child as THREE.Mesh).isMesh) {
               const mesh = child as THREE.Mesh;
-              const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
-              mats.forEach((m) => {
+              const sourceMats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+              if (sourceMats.length === 0) return;
+              // Lookdev materials (e.g. materialsMap.current.grey) are ONE shared instance reused
+              // across every part in the model — assigning THIS part's compensated planes directly
+              // to a shared material would immediately get overwritten by whichever other part
+              // using the same material is processed next, so every part sharing it would render
+              // with a clip plane meant for someone else. Give this mesh its own exclusive clone
+              // to carry its own planes without disturbing siblings.
+              const exclusiveMats = getExclusiveClipMaterials(mesh, sourceMats);
+              exclusiveMats.forEach((m) => {
                 const clipPlanesChanged = m.clippingPlanes !== partPlanes;
                 m.clippingPlanes = partPlanes!;
                 m.clipShadows = true;
@@ -1384,6 +1432,7 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
                   m.needsUpdate = true;
                 }
               });
+              mesh.material = exclusiveMats.length === 1 ? exclusiveMats[0] : exclusiveMats;
             }
           });
         });
@@ -1391,6 +1440,11 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         currentModelRef.current.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
             const mesh = child as THREE.Mesh;
+            // Not doing per-part clipping right now — every mesh can safely share one plane
+            // array again, so undo any exclusive clone a prior exploded+clipping pass made for
+            // this mesh (see getExclusiveClipMaterials) and go back to the shared instance, or a
+            // stale clone would silently stop picking up live material-property edits.
+            revertExclusiveClipMaterial(mesh);
             const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
             mats.forEach((m) => {
               const clipPlanesChanged = m.clippingPlanes !== nextClippingPlanes;
@@ -2405,10 +2459,18 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       part.object.parent?.remove(part.object);
       batchPartsRef.current.splice(index, 1);
+      batchPartPlanesRef.current.delete(part.object);
 
       part.object.traverse((child) => {
         const mesh = child as THREE.Mesh;
-        if (mesh.isMesh) mesh.geometry?.dispose();
+        if (mesh.isMesh) {
+          mesh.geometry?.dispose();
+          const clipEntry = meshClipMaterialsRef.current.get(mesh);
+          if (clipEntry) {
+            clipEntry.clones.forEach((c) => c.dispose());
+            meshClipMaterialsRef.current.delete(mesh);
+          }
+        }
       });
     };
 
