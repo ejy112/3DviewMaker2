@@ -1332,8 +1332,12 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
 
       const clippingActive = activeClipPlanes.length > 0;
       const isExploded = batchPartsRef.current.length > 1 && (settingsRef.current.explodeAmount || 0) > 0;
-      const rot = currentModelRef.current ? currentModelRef.current.rotation : new THREE.Euler();
-      const scale = dimensionsRef.current.scaleFactor || 1;
+      // The chain between currentModelRef.current and a given part is NOT always a single hop:
+      // detectExplodableParts sometimes unwraps one wrapper level, or falls back to raw mesh
+      // nodes found anywhere in the hierarchy (see its fallback tiers below), so a part's actual
+      // parent can carry its own baked-in rotation/scale that the model group's own transform
+      // doesn't capture. Ensure every ancestor's matrixWorld is current before reading it below.
+      if (currentModelRef.current) currentModelRef.current.updateMatrixWorld(true);
 
       if (isExploded && clippingActive) {
         // Pre-exploded per-object clipping: the slice is defined relative to the model's resting
@@ -1342,8 +1346,17 @@ export const ThreeViewport = forwardRef<ThreeViewportHandle, ThreeViewportProps>
         // geometry as it travels — exactly as if it had been sliced before exploding, not
         // re-sliced against a plane sitting fixed in empty space.
         batchPartsRef.current.forEach((part) => {
-          const localDelta = part.object.position.clone().sub(part.basePosition);
-          const worldDelta = localDelta.applyEuler(rot).multiplyScalar(scale);
+          // Transform the part's rest and current LOCAL positions through its actual parent's
+          // matrixWorld (not a hand-rolled rotation+scale guess) and subtract in world space.
+          // This is exact for any parent transform chain — including an intermediate wrapper
+          // node's own rotation/non-uniform scale — where a single rotation+uniform-scale
+          // shortcut tied to the model group would silently ignore that wrapper's contribution
+          // and let the compensation drift further off the longer a part travels while exploded.
+          const parent = part.object.parent;
+          const worldDelta = parent
+            ? part.object.position.clone().applyMatrix4(parent.matrixWorld)
+                .sub(part.basePosition.clone().applyMatrix4(parent.matrixWorld))
+            : part.object.position.clone().sub(part.basePosition);
 
           let partPlanes = batchPartPlanesRef.current.get(part.object);
           if (!partPlanes || partPlanes.length !== activeClipPlanes.length) {
