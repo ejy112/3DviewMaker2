@@ -3,16 +3,20 @@ import {
   LoadedPart,
   ModelDimensions,
   ResolutionOption,
+  SelectedPartBounds,
   SnapDirection,
   ThemeMode,
   ViewerSettings,
 } from '../types';
 import type { VolumeStats } from './ThreeViewport';
+import { HotkeyModal } from './HotkeyModal';
 import {
+  Box,
   Camera,
   ChevronDown,
   ChevronUp,
   Cloud,
+  Layers,
   Maximize,
   Moon,
   RotateCw,
@@ -20,8 +24,16 @@ import {
   Trash2,
   Upload,
   Video,
+  Film,
   FileImage,
   Sparkles,
+  Ruler,
+  CopyCheck,
+  Eye,
+  EyeOff,
+  Keyboard,
+  List,
+  LogOut,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -40,12 +52,21 @@ interface SidebarProps {
   onToggleTurntable: () => void;
   onRecenter: () => void;
   onSnapView: (dir: SnapDirection) => void;
+  onToggleDimensionMode?: () => void;
   resolution: ResolutionOption;
   onChangeResolution: (res: ResolutionOption) => void;
   onExportTurns: (destination: 'download' | 'drive') => void;
+  onExportThreeQuarterViews?: (destination: 'download' | 'drive') => void;
+  onExportAllSeparate?: (destination: 'download' | 'drive') => void;
   onExportVideo: (format: 'mp4' | 'webm', destination: 'download' | 'drive') => void;
+  onOpenGifExportModal?: (destination?: 'download' | 'drive') => void;
+  onOpenImageExportModal?: (destination?: 'download' | 'drive') => void;
+  onOpenVideoGifExportModal?: (initialMode?: 'video' | 'gif', destination?: 'download' | 'drive') => void;
+  isExportingGif?: boolean;
+  exportGifStatus?: string;
   isExportingImage: boolean;
   exportImageStatus: string;
+  exportImageTarget?: 'turns' | 'threeQuarter' | 'allSeparate' | null;
   isExportingVideo: boolean;
   exportVideoStatus: string;
   onUploadLocalFile: (file: File) => void;
@@ -62,11 +83,17 @@ interface SidebarProps {
   onDeletePart: (index: number) => void;
   onDeleteHiddenParts?: () => void;
   selectedPartIndex?: number | null;
+  selectedPartIndices?: number[];
   onSelectPart?: (index: number | null) => void;
+  onSelectParts?: (indices: number[]) => void;
+  selectedPartInfo?: SelectedPartBounds | null;
   // Isolate mode (hover a part, press I) is exclusively-managed by a snapshot/restore in
   // ThreeViewport — editing visibility here mid-isolate would conflict with that, so the whole
   // Loaded Meshes list goes read-only (but still visible) while it's active.
   isIsolated?: boolean;
+  onCaptureViewport?: () => string | null;
+  onOpenHotkeyModal?: () => void;
+  onSeparateLooseParts?: (index?: number) => void;
 }
 
 interface DimensionInputProps {
@@ -78,6 +105,8 @@ interface DimensionInputProps {
   sensitivity: number;
   isInteger?: boolean;
   isLight: boolean;
+  widthClass?: string;
+  formatDecimals?: number;
 }
 
 function DimensionInput({
@@ -89,18 +118,20 @@ function DimensionInput({
   sensitivity,
   isInteger = false,
   isLight,
+  widthClass = 'w-24',
+  formatDecimals = 3,
 }: DimensionInputProps) {
   const [localStr, setLocalStr] = useState<string>(() =>
-    isInteger ? String(Math.round(value)) : value.toFixed(3)
+    isInteger ? String(Math.round(value)) : value.toFixed(formatDecimals)
   );
   const isFocusedRef = useRef(false);
 
   // Sync from outside if user is not actively typing
   useEffect(() => {
     if (!isFocusedRef.current) {
-      setLocalStr(isInteger ? String(Math.round(value)) : value.toFixed(3));
+      setLocalStr(isInteger ? String(Math.round(value)) : value.toFixed(formatDecimals));
     }
-  }, [value, isInteger]);
+  }, [value, isInteger, formatDecimals]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;
@@ -115,16 +146,17 @@ function DimensionInput({
     isFocusedRef.current = false;
     const parsed = parseFloat(localStr);
     if (isNaN(parsed) || (min !== null && parsed < min && !isInteger)) {
-      setLocalStr(isInteger ? String(Math.round(value)) : value.toFixed(3));
+      setLocalStr(isInteger ? String(Math.round(value)) : value.toFixed(formatDecimals));
     } else {
       const finalVal = isInteger ? Math.round(parsed) : parsed;
-      setLocalStr(isInteger ? String(finalVal) : finalVal.toFixed(3));
+      setLocalStr(isInteger ? String(finalVal) : finalVal.toFixed(formatDecimals));
       onCommit(finalVal);
     }
   };
 
-  const handleFocus = () => {
+  const handleFocus = (e: React.FocusEvent<HTMLInputElement>) => {
     isFocusedRef.current = true;
+    e.target.select();
   };
 
   // Blender-style horizontal click-and-drag scrubbing
@@ -141,8 +173,8 @@ function DimensionInput({
         document.body.style.userSelect = 'none';
         let newVal = startVal + delta * sensitivity;
         if (min !== null && newVal < min) newVal = min;
-        const formatted = isInteger ? Math.round(newVal) : parseFloat(newVal.toFixed(3));
-        setLocalStr(isInteger ? String(formatted) : formatted.toFixed(3));
+        const formatted = isInteger ? Math.round(newVal) : parseFloat(newVal.toFixed(formatDecimals));
+        setLocalStr(isInteger ? String(formatted) : formatted.toFixed(formatDecimals));
         onCommit(formatted);
       }
     };
@@ -162,16 +194,15 @@ function DimensionInput({
 
   return (
     <input
-      type="number"
+      type="text"
+      inputMode="decimal"
       id={id}
-      step={step}
-      min={min !== null ? min : undefined}
       value={localStr}
       onChange={handleChange}
       onFocus={handleFocus}
       onBlur={handleBlur}
       onMouseDown={handleMouseDown}
-      className={`w-24 text-right py-1 px-2 font-mono font-bold text-xs rounded-md border text-sky-400 cursor-ew-resize ${
+      className={`${widthClass} text-right py-1 px-2 font-mono font-bold text-xs rounded-md border text-sky-400 cursor-ew-resize focus:outline-none focus:ring-1 focus:ring-sky-400 ${
         isLight
           ? 'bg-slate-100 border-slate-300 text-slate-900'
           : 'bg-[#1e293b] border-slate-600'
@@ -181,7 +212,7 @@ function DimensionInput({
 }
 
 interface AccordionSectionProps {
-  title: string;
+  title: React.ReactNode;
   isOpen: boolean;
   onToggle: () => void;
   children: React.ReactNode;
@@ -190,11 +221,21 @@ interface AccordionSectionProps {
   // Optional extra control (e.g. "Hide All") rendered between the title and the chevron —
   // a sibling of both toggle buttons, not nested inside either, so it never fights their clicks.
   headerExtra?: React.ReactNode;
+  titleColor?: string;
 }
 
-// Shared collapsible section used for Clipping Planes, Post-Processing, and Volume & Cost —
+// Shared collapsible section used for Clipping Planes, Post-Processing, Volume & Cost, and Loaded Meshes —
 // keeps their header style, spacing, and toggle behavior identical everywhere they appear.
-function AccordionSection({ title, isOpen, onToggle, children, bordered, isLight, headerExtra }: AccordionSectionProps) {
+function AccordionSection({
+  title,
+  isOpen,
+  onToggle,
+  children,
+  bordered,
+  isLight,
+  headerExtra,
+  titleColor,
+}: AccordionSectionProps) {
   return (
     <div
       className={`flex flex-col gap-2 ${
@@ -204,13 +245,18 @@ function AccordionSection({ title, isOpen, onToggle, children, bordered, isLight
       <div className="w-full flex items-center justify-between gap-2">
         <button
           onClick={onToggle}
-          className="flex-1 text-left text-[11px] font-bold text-slate-400 uppercase tracking-wider cursor-pointer"
+          className={`flex-1 text-left text-[11px] font-bold uppercase tracking-wider cursor-pointer flex items-center gap-1.5 ${
+            titleColor || 'text-slate-400'
+          }`}
         >
           {title}
         </button>
         <div className="flex items-center gap-2">
           {headerExtra}
-          <button onClick={onToggle} className="text-slate-400 cursor-pointer flex items-center">
+          <button
+            onClick={onToggle}
+            className={`cursor-pointer flex items-center ${titleColor || 'text-slate-400'}`}
+          >
             {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
           </button>
         </div>
@@ -233,12 +279,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleTurntable,
   onRecenter,
   onSnapView,
+  onToggleDimensionMode,
   resolution,
   onChangeResolution,
   onExportTurns,
+  onExportThreeQuarterViews,
+  onExportAllSeparate,
   onExportVideo,
+  onOpenGifExportModal,
+  onOpenImageExportModal,
+  onOpenVideoGifExportModal,
+  isExportingGif = false,
+  exportGifStatus = '',
   isExportingImage,
   exportImageStatus,
+  exportImageTarget,
   isExportingVideo,
   exportVideoStatus,
   onUploadLocalFile,
@@ -255,14 +310,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onDeletePart,
   onDeleteHiddenParts,
   selectedPartIndex,
+  selectedPartIndices,
   onSelectPart,
+  onSelectParts,
+  selectedPartInfo,
   isIsolated,
+  onCaptureViewport,
+  onOpenHotkeyModal,
+  onSeparateLooseParts,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isVolumeOpen, setIsVolumeOpen] = useState(false);
   const [isLoadedMeshesOpen, setIsLoadedMeshesOpen] = useState(false);
   const [showExportDriveMenu, setShowExportDriveMenu] = useState(false);
+  const [isHotkeyModalOpen, setIsHotkeyModalOpen] = useState(false);
 
   const isLight = theme === 'light';
 
@@ -374,6 +436,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
     });
   };
 
+  const handleSelectAllVisible = () => {
+    if (isIsolated || parts.length === 0) return;
+    const visibleIndices = parts
+      .map((p, idx) => (p.visible ? idx : -1))
+      .filter((idx) => idx !== -1);
+    if (visibleIndices.length === 0) return;
+
+    const cur =
+      selectedPartIndices ||
+      (selectedPartIndex !== null && selectedPartIndex !== undefined ? [selectedPartIndex] : []);
+    const allSelected =
+      visibleIndices.length === cur.length &&
+      visibleIndices.every((idx) => cur.includes(idx));
+
+    if (allSelected) {
+      if (onSelectParts) onSelectParts([]);
+      else onSelectPart?.(null);
+    } else {
+      if (onSelectParts) onSelectParts(visibleIndices);
+      else if (visibleIndices.length > 0) onSelectPart?.(visibleIndices[0]);
+    }
+  };
+
   const hasRotations = dimensions.rotX !== 0 || dimensions.rotY !== 0 || dimensions.rotZ !== 0;
 
   return (
@@ -408,7 +493,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span id="app-title-header" className="font-bold text-xs tracking-wider uppercase opacity-90 flex items-center gap-1.5">
                 <span>3DViewMaker</span>
                 <span className="font-mono text-[10px] text-sky-400 font-semibold normal-case px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20">
-                  v1.08
+                  v1.55
                 </span>
               </span>
             </div>
@@ -429,7 +514,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
 
-          {/* Load CAD: Local, Drive, or Demo. Selecting (or dropping) more than one file loads
+          {/* Load CAD: Local, Drive, or Ok, can you fix this issue: when saving export images to "separate individual images" I can see a really soft dimension and extension line but no dimension text, when a mesh is selected. The export all views to one image works perfect, the separate images need to print those dims the same way.Demo. Selecting (or dropping) more than one file loads
               them as a multi-part assembly instead of needing a separate batch-load control. */}
           <div className="flex flex-col gap-2">
             <div
@@ -491,22 +576,43 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
 
-          {/* LOADED MESHES — only relevant once a model actually has multiple separable parts
-              (a batch-loaded assembly, or a GLB whose top-level nodes are separable meshes).
-              Sits right above the Viewer panel so it's visible as soon as an assembly loads. */}
-          {parts.length > 1 && (
+          {/* LOADED MESHES — visible whenever one or more meshes are loaded (single STL/OBJ or multi-part assembly).
+              Sits right above the Viewer panel so it's visible as soon as a model or assembly loads. */}
+          {parts.length > 0 && (
             <div
               className={`p-3 rounded-lg border flex flex-col gap-2 ${
                 isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
               }`}
             >
               <AccordionSection
-                title="Loaded Meshes"
+                title={
+                  <span className="flex items-center gap-1.5">
+                    <List className="w-3.5 h-3.5 text-sky-500" />
+                    <span>MESHES</span>
+                  </span>
+                }
                 isOpen={isLoadedMeshesOpen}
                 onToggle={() => setIsLoadedMeshesOpen(!isLoadedMeshesOpen)}
                 isLight={isLight}
+                titleColor="text-sky-500"
                 headerExtra={
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    {onSeparateLooseParts && !isIsolated && parts.length > 0 && (
+                      <button
+                        type="button"
+                        id="btnSeparateLooseParts"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSeparateLooseParts();
+                        }}
+                        disabled={isIsolated}
+                        title="Separate by loose parts (P) — splits disconnected shells into independent meshes"
+                        className="p-1 rounded text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent transition-colors flex items-center justify-center"
+                        aria-label="Split loose parts"
+                      >
+                        <Layers className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     {onDeleteHiddenParts && !isIsolated && parts.some((p) => !p.visible) && (
                       <button
                         onClick={(e) => {
@@ -514,26 +620,37 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           onDeleteHiddenParts();
                         }}
                         title="Permanently remove all currently hidden meshes from scene and memory"
-                        className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 cursor-pointer whitespace-nowrap px-1.5 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 transition-colors"
+                        className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 cursor-pointer whitespace-nowrap px-1.5 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 transition-colors mr-0.5"
                       >
                         Delete Hidden
                       </button>
                     )}
                     <button
+                      onClick={handleSelectAllVisible}
+                      disabled={isIsolated || parts.length === 0}
+                      title={isIsolated ? 'Exit isolate mode (I) to select parts' : 'Select all visible meshes in viewport (or press A)'}
+                      className="p-1 rounded text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent transition-colors flex items-center justify-center"
+                      aria-label="Select all visible meshes"
+                    >
+                      <CopyCheck className="w-3.5 h-3.5" />
+                    </button>
+                    <button
                       onClick={handleShowAllParts}
                       disabled={isIsolated}
-                      title={isIsolated ? 'Exit isolate mode (I) to change visibility' : 'Show every loaded part'}
-                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400"
+                      title={isIsolated ? 'Exit isolate mode (I) to change visibility' : 'Show every loaded mesh (or press U in viewport)'}
+                      className="p-1 rounded text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent transition-colors flex items-center justify-center"
+                      aria-label="Show all loaded meshes"
                     >
-                      Show All
+                      <Eye className="w-3.5 h-3.5" />
                     </button>
                     <button
                       onClick={handleHideAllParts}
                       disabled={isIsolated}
-                      title={isIsolated ? 'Exit isolate mode (I) to change visibility' : 'Hide every loaded part'}
-                      className="text-[10px] font-semibold text-slate-400 hover:text-sky-400 cursor-pointer whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400"
+                      title={isIsolated ? 'Exit isolate mode (I) to change visibility' : 'Hide every loaded mesh'}
+                      className="p-1 rounded text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent transition-colors flex items-center justify-center"
+                      aria-label="Hide all loaded meshes"
                     >
-                      Hide All
+                      <EyeOff className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 }
@@ -544,51 +661,135 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </div>
                 )}
                 {parts.map((part, i) => {
-                  const isSelected = selectedPartIndex === i;
+                  const isSelected = selectedPartIndices
+                    ? selectedPartIndices.includes(i)
+                    : selectedPartIndex === i;
                   return (
                     <div
                       key={`${part.name}-${i}`}
-                      onClick={() => !isIsolated && onSelectPart?.(isSelected ? null : i)}
-                      className={`flex items-center justify-between gap-2 p-1 -mx-1 rounded-md transition-colors ${
+                      onClick={(e) => {
+                        if (isIsolated) return;
+                        if (e.shiftKey && onSelectParts) {
+                          const currentIndices =
+                            selectedPartIndices ||
+                            (selectedPartIndex !== null && selectedPartIndex !== undefined
+                              ? [selectedPartIndex]
+                              : []);
+                          if (currentIndices.includes(i)) {
+                            onSelectParts(currentIndices.filter((idx) => idx !== i));
+                          } else {
+                            onSelectParts([...currentIndices, i]);
+                          }
+                        } else {
+                          const isOnlySelected =
+                            isSelected &&
+                            (!selectedPartIndices || selectedPartIndices.length === 1);
+                          onSelectPart?.(isOnlySelected ? null : i);
+                        }
+                      }}
+                      className={`flex flex-col p-1.5 -mx-1 rounded-md transition-colors ${
                         isIsolated ? '' : 'cursor-pointer'
                       } ${
                         isSelected
                           ? 'bg-sky-500/20 border border-sky-500/50'
                           : 'border border-transparent hover:bg-slate-800/40'
                       }`}
-                      title={isIsolated ? undefined : 'Click to select in 3D view'}
+                      title={isIsolated ? undefined : 'Click to select (Shift+Click to multi-select)'}
                     >
-                      <label
-                        className={`flex items-center gap-2 min-w-0 flex-1 ${
-                          isIsolated ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
-                        }`}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={part.visible}
+                      <div className="flex items-center justify-between gap-2">
+                        <label
+                          className={`flex items-center gap-2 min-w-0 flex-1 ${
+                            isIsolated ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+                          }`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={part.visible}
+                            disabled={isIsolated}
+                            onChange={() => onTogglePartVisibility(i)}
+                            className="accent-sky-500 w-4 h-4 shrink-0 disabled:cursor-not-allowed cursor-pointer"
+                          />
+                          <span className={`truncate ${isSelected ? 'text-sky-300 font-semibold' : ''}`} title={part.name}>
+                            {part.name}
+                          </span>
+                        </label>
+                        {onSeparateLooseParts && (
+                          <button
+                            type="button"
+                            id={`btnSeparatePart-${i}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onSeparateLooseParts(i);
+                            }}
+                            disabled={isIsolated}
+                            title="Split this mesh into loose parts (P)"
+                            className="p-1 rounded text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                            aria-label={`Split ${part.name} into loose parts`}
+                          >
+                            <Layers className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeletePart(i);
+                          }}
                           disabled={isIsolated}
-                          onChange={() => onTogglePartVisibility(i)}
-                          className="accent-sky-500 w-4 h-4 shrink-0 disabled:cursor-not-allowed cursor-pointer"
-                        />
-                        <span className={`truncate ${isSelected ? 'text-sky-300 font-semibold' : ''}`} title={part.name}>
-                          {part.name}
-                        </span>
-                      </label>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeletePart(i);
-                        }}
-                        disabled={isIsolated}
-                        title={isIsolated ? 'Exit isolate mode (I) to delete parts' : 'Remove this part from the scene and free its memory'}
-                        className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                          title={isIsolated ? 'Exit isolate mode (I) to delete parts' : 'Remove this part from the scene and free its memory'}
+                          className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      {isSelected && selectedPartInfo && (!selectedPartInfo.count || selectedPartInfo.count <= 1) && (
+                        <div className="mt-1.5 pt-1.5 border-t border-sky-500/30 text-[10px] text-sky-200 font-mono flex flex-col gap-0.5 pl-6">
+                          <div className="text-[9px] uppercase tracking-wider text-slate-400 font-sans font-semibold">
+                            Bounding Box
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-slate-400 font-sans">Width (X):</span>
+                            <span>{selectedPartInfo.wIn.toFixed(3)}&quot; ({selectedPartInfo.wMm.toFixed(1)} mm)</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-slate-400 font-sans">Height (Y):</span>
+                            <span>{selectedPartInfo.hIn.toFixed(3)}&quot; ({selectedPartInfo.hMm.toFixed(1)} mm)</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-slate-400 font-sans">Depth (Z):</span>
+                            <span>{selectedPartInfo.dIn.toFixed(3)}&quot; ({selectedPartInfo.dMm.toFixed(1)} mm)</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
+                {selectedPartInfo && selectedPartInfo.count > 1 && (
+                  <div className="mt-2 p-2.5 rounded-lg bg-sky-500/10 border border-sky-500/40 text-[11px] text-sky-200 font-mono flex flex-col gap-1">
+                    <div className="flex items-center justify-between font-sans text-xs font-semibold text-white">
+                      <span>Combined Box ({selectedPartInfo.count} meshes)</span>
+                      <button
+                        onClick={() => (onSelectParts ? onSelectParts([]) : onSelectPart?.(null))}
+                        className="text-[10px] text-slate-400 hover:text-white cursor-pointer px-1 py-0.5 rounded hover:bg-slate-800"
+                        title="Deselect all (Esc)"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-400 font-sans">Width (X):</span>
+                      <span>{selectedPartInfo.wIn.toFixed(3)}&quot; ({selectedPartInfo.wMm.toFixed(1)} mm)</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-400 font-sans">Height (Y):</span>
+                      <span>{selectedPartInfo.hIn.toFixed(3)}&quot; ({selectedPartInfo.hMm.toFixed(1)} mm)</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-400 font-sans">Depth (Z):</span>
+                      <span>{selectedPartInfo.dIn.toFixed(3)}&quot; ({selectedPartInfo.dMm.toFixed(1)} mm)</span>
+                    </div>
+                  </div>
+                )}
 
                 {onDeleteHiddenParts && !isIsolated && parts.some((p) => !p.visible) && (
                   <button
@@ -604,14 +805,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           )}
 
-          {/* VIEWER PANEL */}
+          {/* VIEW OPTIONS PANEL */}
           <div
             className={`p-3 rounded-lg border flex flex-col gap-2.5 ${
               isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
             }`}
           >
-            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-              VIEWER
+            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+              <Box className="w-3.5 h-3.5 text-sky-400" />
+              <span>VIEW OPTIONS</span>
             </div>
 
             {/* Camera Framing Buttons */}
@@ -637,6 +839,52 @@ export const Sidebar: React.FC<SidebarProps> = ({
               >
                 {isTurntableActive ? 'Turntable: ON (Spacebar)' : 'Turntable: OFF (Spacebar)'}
               </button>
+
+              {/* Turntable Direction & Speed — positioned directly below turntable button and above preset views */}
+              <div
+                className={`col-span-2 flex items-center justify-between gap-1.5 p-1.5 rounded-md border text-[11px] ${
+                  isLight ? 'bg-slate-100 border-slate-300' : 'bg-slate-800/60 border-slate-700/60'
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 font-medium">Dir:</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateSettings({
+                        turntableDirection: (settings.turntableDirection || 'cw') === 'cw' ? 'ccw' : 'cw',
+                      })
+                    }
+                    className={`px-2 py-0.5 rounded font-semibold text-[10px] cursor-pointer transition-colors ${
+                      isLight
+                        ? 'bg-white hover:bg-slate-200 border border-slate-300 text-slate-700'
+                        : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
+                    }`}
+                    title="Toggle Rotation Direction (CW: Clockwise, CCW: Counter-Clockwise)"
+                  >
+                    {(settings.turntableDirection || 'cw').toUpperCase()}
+                  </button>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400 font-medium">Speed:</span>
+                  {(['slow', 'normal', 'fast'] as const).map((spd) => (
+                    <button
+                      key={spd}
+                      type="button"
+                      onClick={() => onUpdateSettings({ turntableSpeed: spd })}
+                      className={`px-1.5 py-0.5 rounded capitalize text-[10px] font-medium cursor-pointer transition-colors ${
+                        (settings.turntableSpeed || 'normal') === spd
+                          ? 'bg-sky-600 text-white font-semibold'
+                          : isLight
+                          ? 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+                          : 'bg-slate-700/60 hover:bg-slate-700 text-slate-300'
+                      }`}
+                    >
+                      {spd}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               <button
                 id="btnFront"
@@ -711,51 +959,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 3/4 Front-R (8)
               </button>
 
-              {/* Turntable Direction & Speed */}
-              <div
-                className={`col-span-2 flex items-center justify-between gap-1.5 p-1.5 rounded-md border text-[11px] ${
-                  isLight ? 'bg-slate-100 border-slate-300' : 'bg-slate-800/60 border-slate-700/60'
+              {/* Fullscreen Toggle Button — positioned directly under the 3/4 views in the viewer area */}
+              <button
+                id="btnFullscreenToggle"
+                onClick={onToggleFullscreen}
+                className={`col-span-2 py-2 px-2.5 rounded-md font-semibold text-xs transition-colors cursor-pointer text-center ${
+                  isLight
+                    ? 'bg-slate-300 hover:bg-slate-400 text-slate-900'
+                    : 'bg-slate-700 hover:bg-slate-600 text-white'
                 }`}
               >
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 font-medium">Dir:</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onUpdateSettings({
-                        turntableDirection: (settings.turntableDirection || 'cw') === 'cw' ? 'ccw' : 'cw',
-                      })
-                    }
-                    className={`px-2 py-0.5 rounded font-semibold text-[10px] cursor-pointer transition-colors ${
-                      isLight
-                        ? 'bg-white hover:bg-slate-200 border border-slate-300 text-slate-700'
-                        : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
-                    }`}
-                    title="Toggle Rotation Direction (CW: Clockwise, CCW: Counter-Clockwise)"
-                  >
-                    {(settings.turntableDirection || 'cw').toUpperCase()}
-                  </button>
-                </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-slate-400 font-medium">Speed:</span>
-                  {(['slow', 'normal', 'fast'] as const).map((spd) => (
-                    <button
-                      key={spd}
-                      type="button"
-                      onClick={() => onUpdateSettings({ turntableSpeed: spd })}
-                      className={`px-1.5 py-0.5 rounded capitalize text-[10px] font-medium cursor-pointer transition-colors ${
-                        (settings.turntableSpeed || 'normal') === spd
-                          ? 'bg-sky-600 text-white font-semibold'
-                          : isLight
-                          ? 'bg-slate-200 hover:bg-slate-300 text-slate-700'
-                          : 'bg-slate-700/60 hover:bg-slate-700 text-slate-300'
-                      }`}
-                    >
-                      {spd}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                {isFullscreen ? 'Exit Fullscreen (Esc)' : 'Fullscreen Toggle (F/Esc)'}
+              </button>
             </div>
           </div>
 
@@ -766,136 +981,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
             }`}
           >
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                EXPORT
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <LogOut className="w-3.5 h-3.5 text-slate-400 rotate-180" />
+                <span>EXPORT</span>
               </span>
+            </div>
+
+            {/* Main Export Action Buttons */}
+            <div className="flex flex-col gap-2">
+              {/* Green IMAGES Button with stack of images icon */}
               <button
-                onClick={() => setShowExportDriveMenu(!showExportDriveMenu)}
-                className={`text-[10px] flex items-center gap-1 font-semibold px-1.5 py-0.5 rounded cursor-pointer ${
-                  showExportDriveMenu
-                    ? 'bg-blue-500 text-white'
-                    : isLight
-                    ? 'text-blue-600 hover:bg-blue-50'
-                    : 'text-blue-400 hover:bg-blue-900/30'
-                }`}
+                id="btnOpenImageExportModal"
+                onClick={() => onOpenImageExportModal?.('download')}
+                disabled={isExportingImage || isExportingVideo || isExportingGif || !hasModel}
+                className="w-full py-2.5 px-3 rounded-md font-semibold text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-xs"
+                title="Configure & Export Image Views (S)"
               >
-                <Cloud className="w-3 h-3" />
-                <span>Drive Options</span>
+                <Layers className="w-4 h-4 shrink-0" />
+                <span className="truncate">
+                  {isExportingImage ? exportImageStatus || 'Exporting Images...' : 'EXPORT IMAGES (S)'}
+                </span>
+              </button>
+
+              {/* Blue VIDEO / GIF Button with film icon */}
+              <button
+                id="btnOpenVideoGifExportModal"
+                onClick={() => onOpenVideoGifExportModal?.('video', 'download')}
+                disabled={isExportingImage || isExportingVideo || isExportingGif || !hasModel}
+                className="w-full py-2.5 px-3 rounded-md font-semibold text-xs bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-xs"
+                title="Configure & Export Video or GIF (V)"
+              >
+                <Film className="w-4 h-4 shrink-0" />
+                <span className="truncate">
+                  {isExportingVideo
+                    ? exportVideoStatus || 'Exporting Video...'
+                    : isExportingGif
+                    ? exportGifStatus || 'Exporting GIF...'
+                    : 'EXPORT VIDEO / GIF (V)'}
+                </span>
               </button>
             </div>
-
-            {/* Resolution & Image Export */}
-            <div className="flex flex-col gap-1">
-              <span className="text-[10px] font-bold text-slate-400 uppercase">Resolution</span>
-              <div className="flex gap-2">
-                <select
-                  id="exportResSelect"
-                  value={resolution}
-                  onChange={(e) => onChangeResolution(Number(e.target.value) as ResolutionOption)}
-                  className={`w-14 shrink-0 py-2 px-1 text-xs font-bold rounded-md border outline-hidden ${
-                    isLight
-                      ? 'bg-slate-100 border-slate-300 text-slate-800'
-                      : 'bg-[#1e293b] border-slate-600 text-white'
-                  }`}
-                >
-                  <option value={1}>1k</option>
-                  <option value={2}>2k</option>
-                  <option value={3}>3k</option>
-                  <option value={4}>4k</option>
-                  <option value={5}>5k</option>
-                </select>
-
-                <div className="flex-1 flex gap-1">
-                  <button
-                    id="btnExportTurns"
-                    onClick={() => onExportTurns('download')}
-                    disabled={isExportingImage || isExportingVideo || !hasModel}
-                    className="flex-1 py-2 px-2 rounded-md font-semibold text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-colors cursor-pointer text-center truncate"
-                  >
-                    {isExportingImage ? exportImageStatus : 'Export Turns to Image (S)'}
-                  </button>
-
-                  {showExportDriveMenu && (
-                    <button
-                      id="btnExportTurnsDrive"
-                      onClick={() => onExportTurns('drive')}
-                      disabled={isExportingImage || isExportingVideo || !hasModel}
-                      className="p-2 rounded-md bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors cursor-pointer"
-                      title="Export Turnaround sheet directly to Google Drive"
-                    >
-                      <Cloud className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <hr className={`border-0 border-t ${isLight ? 'border-slate-200' : 'border-slate-700'}`} />
-
-            {/* Side-by-Side Video Export Options */}
-            <div className="grid grid-cols-2 gap-1.5">
-              <div className="flex gap-1">
-                <button
-                  id="btnExportMp4"
-                  onClick={() => onExportVideo('mp4', 'download')}
-                  disabled={isExportingImage || isExportingVideo || !hasModel}
-                  className="flex-1 py-2 px-1 text-center font-semibold text-[11px] rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white transition-colors cursor-pointer truncate"
-                >
-                  {isExportingVideo && exportVideoStatus.includes('MP4')
-                    ? exportVideoStatus
-                    : 'Export MP4 (V)'}
-                </button>
-                {showExportDriveMenu && (
-                  <button
-                    id="btnExportMp4Drive"
-                    onClick={() => onExportVideo('mp4', 'drive')}
-                    disabled={isExportingImage || isExportingVideo || !hasModel}
-                    className="p-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white"
-                    title="Export MP4 to Drive"
-                  >
-                    <Cloud className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-
-              <div className="flex gap-1">
-                <button
-                  id="btnExportWebm"
-                  onClick={() => onExportVideo('webm', 'download')}
-                  disabled={isExportingImage || isExportingVideo || !hasModel}
-                  className="flex-1 py-2 px-1 text-center font-semibold text-[11px] rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white transition-colors cursor-pointer truncate"
-                >
-                  {isExportingVideo && exportVideoStatus.includes('WebM')
-                    ? exportVideoStatus
-                    : 'Export WebM (W)'}
-                </button>
-                {showExportDriveMenu && (
-                  <button
-                    id="btnExportWebmDrive"
-                    onClick={() => onExportVideo('webm', 'drive')}
-                    disabled={isExportingImage || isExportingVideo || !hasModel}
-                    className="p-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white"
-                    title="Export WebM to Drive"
-                  >
-                    <Cloud className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Video Easing Checkbox */}
-            <label className="flex items-center justify-between gap-2 px-1 pt-2 border-t border-slate-700/50 text-xs text-slate-300 cursor-pointer select-none">
-              <span className="text-[11px] font-medium text-slate-400">Video Easing (Smooth start/stop)</span>
-              <input
-                type="checkbox"
-                checked={!!settings.videoEasing}
-                onChange={(e) => onUpdateSettings({ videoEasing: e.target.checked })}
-                className="accent-sky-500 w-3.5 h-3.5 cursor-pointer"
-              />
-            </label>
           </div>
 
-          {/* SETTINGS ACCORDION */}
+          {/* MODEL SCALE & ROTATION ACCORDION */}
           <div
             className={`p-3 rounded-lg border flex flex-col gap-2 ${
               isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
@@ -906,7 +1034,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={() => setIsSettingsOpen(!isSettingsOpen)}
               className="w-full flex items-center justify-between text-xs font-bold text-sky-500 uppercase cursor-pointer"
             >
-              <span>SETTINGS</span>
+              <span>MODEL SCALE & ROTATION</span>
               <span id="settingsIcon">
                 {isSettingsOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               </span>
@@ -915,17 +1043,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             {isSettingsOpen && (
               <div id="settingsContent" className="flex flex-col gap-2.5 pt-1.5">
                 {/* Scale, Size & Rotation Panel (shown when model loaded) */}
-                {hasModel && (
+                {hasModel ? (
                   <div
                     id="dimWrapper"
                     className={`pt-2 border-t flex flex-col gap-2 ${
                       isLight ? 'border-slate-200' : 'border-slate-700'
                     }`}
                   >
-                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                      Scale/Rotation
-                    </div>
-
                     {/* Dimensions group */}
                     <div className="flex flex-col gap-2">
                       <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
@@ -1041,85 +1165,238 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         value!
                       </div>
                     )}
-
-                    {/* Volume, Weight & Cost Estimate */}
-                    {volumeStats && (
-                      <AccordionSection
-                        title="Volume & Cost Estimate"
-                        isOpen={isVolumeOpen}
-                        onToggle={() => setIsVolumeOpen(!isVolumeOpen)}
-                        bordered
-                        isLight={isLight}
-                      >
-                        {!volumeStats.isWatertight && (
-                          <div className="text-xs text-amber-400 leading-tight">
-                            Mesh isn&apos;t fully watertight — volume/weight may be approximate.
-                          </div>
-                        )}
-                        <div className="grid grid-cols-2 gap-y-1">
-                          <span className="text-slate-400">Volume</span>
-                          <span className="text-right font-mono text-sky-400">
-                            {volumeStats.volumeCm3.toFixed(2)} cm³
-                          </span>
-                          <span className="text-slate-400">Weight</span>
-                          <span className="text-right font-mono text-sky-400">
-                            {volumeStats.weightGrams.toFixed(1)} g
-                          </span>
-                          <span className="text-slate-400">Est. Cost</span>
-                          <span className="text-right font-mono text-emerald-400">
-                            ${volumeStats.estimatedCost.toFixed(2)}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Density (g/cm³)</span>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0.01"
-                            value={settings.materialDensityGCm3}
-                            onChange={(e) =>
-                              onUpdateSettings({ materialDensityGCm3: parseFloat(e.target.value) || 1 })
-                            }
-                            className={`w-16 text-right py-1 px-1.5 font-mono rounded-md border text-sky-400 ${
-                              isLight ? 'bg-slate-100 border-slate-300 text-slate-900' : 'bg-[#1e293b] border-slate-600'
-                            }`}
-                          />
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Cost / kg (USD)</span>
-                          <input
-                            type="number"
-                            step="0.5"
-                            min="0"
-                            value={settings.costPerKgUSD}
-                            onChange={(e) =>
-                              onUpdateSettings({ costPerKgUSD: parseFloat(e.target.value) || 0 })
-                            }
-                            className={`w-16 text-right py-1 px-1.5 font-mono rounded-md border text-sky-400 ${
-                              isLight ? 'bg-slate-100 border-slate-300 text-slate-900' : 'bg-[#1e293b] border-slate-600'
-                            }`}
-                          />
-                        </div>
-                      </AccordionSection>
-                    )}
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-400 italic py-1">
+                    Load a 3D model to adjust scale and rotation.
                   </div>
                 )}
               </div>
             )}
           </div>
 
-          {/* Fullscreen Toggle Button */}
-          <button
-            id="btnFullscreenToggle"
-            onClick={onToggleFullscreen}
-            className={`w-full py-2.5 px-3 rounded-md font-semibold text-xs transition-colors cursor-pointer text-center ${
-              isLight
-                ? 'bg-slate-300 hover:bg-slate-400 text-slate-900'
-                : 'bg-slate-700 hover:bg-slate-600 text-white'
+          {/* VOLUME & COST ESTIMATE ACCORDION (separate and below Settings Section) */}
+          <div
+            className={`p-3 rounded-lg border flex flex-col gap-2 ${
+              isLight ? 'bg-white border-slate-200 shadow-2xs' : 'bg-[#0f172a] border-slate-700'
             }`}
           >
-            {isFullscreen ? 'Exit Fullscreen (Esc)' : 'Fullscreen Toggle (F/Esc)'}
-          </button>
+            <button
+              id="volumeToggleBtn"
+              onClick={() => setIsVolumeOpen(!isVolumeOpen)}
+              className="w-full flex items-center justify-between text-xs font-bold text-sky-500 uppercase cursor-pointer"
+            >
+              <span>VOLUME & COST ESTIMATE</span>
+              <span id="volumeIcon">
+                {isVolumeOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </span>
+            </button>
+
+            {isVolumeOpen && (
+              <div id="volumeContent" className="flex flex-col gap-2.5 pt-1.5 text-xs">
+                {volumeStats ? (
+                  <>
+                    {!volumeStats.isWatertight && (
+                      <div className="text-xs text-amber-400 leading-tight">
+                        Mesh isn&apos;t fully watertight — volume/weight may be approximate.
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-y-1">
+                      <span className="text-slate-400 flex items-center gap-1">
+                        Volume
+                        {volumeStats.isPartialSelection && (
+                          <span className="text-amber-400 font-bold">*</span>
+                        )}
+                      </span>
+                      <span className="text-right font-mono text-sky-400">
+                        {volumeStats.volumeCm3.toFixed(2)} cm³
+                      </span>
+                      <span className="text-slate-400 flex items-center gap-1">
+                        Weight
+                        {volumeStats.isPartialSelection && (
+                          <span className="text-amber-400 font-bold">*</span>
+                        )}
+                      </span>
+                      <span className="text-right font-mono text-sky-400">
+                        {volumeStats.weightGrams.toFixed(1)} g
+                      </span>
+                      {volumeStats.isPartialSelection && (
+                        <div className="col-span-2 text-[10px] text-amber-400/90 font-mono -mt-0.5 mb-0.5">
+                          * Selected {volumeStats.selectedCount === 1 ? 'mesh' : `${volumeStats.selectedCount} meshes`} only ({volumeStats.selectedCount} of {volumeStats.totalPartCount || parts.length})
+                        </div>
+                      )}
+                      <span className="text-slate-400 flex items-center gap-1">
+                        Est. Cost
+                        {volumeStats.isPartialSelection && (
+                          <span className="text-amber-400 font-bold">*</span>
+                        )}
+                      </span>
+                      <span className="text-right font-mono text-emerald-400">
+                        ${volumeStats.estimatedCost.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Density (g/cm³)</span>
+                      <DimensionInput
+                        id="sidebarDensityInput"
+                        value={settings.materialDensityGCm3}
+                        onCommit={(val) => onUpdateSettings({ materialDensityGCm3: val })}
+                        step="0.01"
+                        min={0.01}
+                        sensitivity={0.01}
+                        formatDecimals={2}
+                        widthClass="w-20"
+                        isLight={isLight}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Cost / kg (USD)</span>
+                      <DimensionInput
+                        id="sidebarCostInput"
+                        value={settings.costPerKgUSD}
+                        onCommit={(val) => onUpdateSettings({ costPerKgUSD: val })}
+                        step="0.10"
+                        min={0}
+                        sensitivity={0.1}
+                        formatDecimals={2}
+                        widthClass="w-20"
+                        isLight={isLight}
+                      />
+                    </div>
+
+                    {/* HR Break below Cost per user request */}
+                    <hr className={`my-2 border-t ${isLight ? 'border-slate-300' : 'border-slate-700/60'}`} />
+
+                    {/* Reference Guide: Ballpark Costs & Plastic Densities */}
+                    <div className="flex flex-col gap-2.5 pt-0.5">
+                      {/* Ballpark Material Costs (Screenshot reference) */}
+                      <div className="flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            Ballpark Material Costs (/kg)
+                          </span>
+                          <span className="text-[9px] text-slate-500 italic">Click to apply</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5 text-xs">
+                          {[
+                            { name: 'PVC (NP)', cost: 1.7143, displayCost: '$1.71', defaultDensity: 1.38 },
+                            { name: 'ABS', cost: 2.0, displayCost: '$2.00', defaultDensity: 1.05 },
+                            { name: 'PP + TPR', cost: 3.68, displayCost: '$3.68', defaultDensity: 0.95 },
+                            { name: 'POM', cost: 3.72, displayCost: '$3.72', defaultDensity: 1.41 },
+                          ].map((mat) => (
+                            <button
+                              key={mat.name}
+                              type="button"
+                              onClick={() => {
+                                onUpdateSettings({
+                                  costPerKgUSD: parseFloat(mat.cost.toFixed(2)),
+                                });
+                              }}
+                              className={`flex items-center justify-between px-2 py-1.5 rounded text-left transition-colors cursor-pointer border ${
+                                isLight
+                                  ? 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800'
+                                  : 'bg-[#1e293b] hover:bg-slate-700/80 border-slate-700 text-slate-200'
+                              }`}
+                              title={`Click to set cost to ${mat.displayCost}/kg`}
+                            >
+                              <span className="font-medium text-[11px]">{mat.name}</span>
+                              <span className="font-mono text-[11px] font-bold text-emerald-400">
+                                {mat.displayCost}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Densities per Plastic Type (Screenshot reference) */}
+                      <div className="flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            Plastic Densities (g/cm³)
+                          </span>
+                          <span className="text-[9px] text-slate-500 italic">Click to apply</span>
+                        </div>
+
+                        {/* PVC */}
+                        <div
+                          className={`p-2 rounded border flex flex-col gap-1 ${
+                            isLight ? 'bg-slate-100 border-slate-300' : 'bg-[#1e293b]/70 border-slate-700/70'
+                          }`}
+                        >
+                          <div className="font-bold text-sky-400 text-[11px]">
+                            PVC (Polyvinyl Chloride)
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            {[
+                              { grade: 'Rigid PVC (uPVC)', range: '1.30 – 1.45', defaultVal: 1.38 },
+                              { grade: 'Flexible / Plasticized PVC', range: '1.10 – 1.35', defaultVal: 1.22 },
+                              { grade: 'Chlorinated PVC (CPVC)', range: '1.45 – 1.58', defaultVal: 1.51 },
+                            ].map((item) => (
+                              <button
+                                key={item.grade}
+                                type="button"
+                                onClick={() => onUpdateSettings({ materialDensityGCm3: item.defaultVal })}
+                                className={`flex items-center justify-between py-1 px-1.5 rounded transition-colors text-left cursor-pointer ${
+                                  isLight ? 'hover:bg-slate-200/80' : 'hover:bg-slate-700/60'
+                                }`}
+                                title={`Click to set density to ${item.defaultVal} g/cm³`}
+                              >
+                                <span className={`text-[11px] ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
+                                  {item.grade}
+                                </span>
+                                <span className="font-mono font-semibold text-[11px] text-sky-400">
+                                  {item.range}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* ABS */}
+                        <div
+                          className={`p-2 rounded border flex flex-col gap-1 ${
+                            isLight ? 'bg-slate-100 border-slate-300' : 'bg-[#1e293b]/70 border-slate-700/70'
+                          }`}
+                        >
+                          <div className="font-bold text-sky-400 text-[11px]">
+                            ABS (Acrylonitrile Butadiene Styrene)
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            {[
+                              { grade: 'Standard / Natural ABS', range: '1.04 – 1.06', defaultVal: 1.05 },
+                              { grade: 'High-Impact ABS', range: '1.00 – 1.10', defaultVal: 1.05 },
+                              { grade: 'Flame-Retardant ABS', range: '1.15 – 1.22', defaultVal: 1.18 },
+                            ].map((item) => (
+                              <button
+                                key={item.grade}
+                                type="button"
+                                onClick={() => onUpdateSettings({ materialDensityGCm3: item.defaultVal })}
+                                className={`flex items-center justify-between py-1 px-1.5 rounded transition-colors text-left cursor-pointer ${
+                                  isLight ? 'hover:bg-slate-200/80' : 'hover:bg-slate-700/60'
+                                }`}
+                                title={`Click to set density to ${item.defaultVal} g/cm³`}
+                              >
+                                <span className={`text-[11px] ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
+                                  {item.grade}
+                                </span>
+                                <span className="font-mono font-semibold text-[11px] text-sky-400">
+                                  {item.range}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-xs text-slate-400 italic py-1">
+                    Load a 3D model to view volume, weight, and estimated material cost.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Jazwares Logo */}
           <div className="pt-2 pb-1 text-center">
@@ -1130,8 +1407,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
               className="mx-auto max-w-[120px] h-auto object-contain opacity-45 hover:opacity-100 transition-opacity duration-300 ease-in-out"
             />
           </div>
+
+          {/* Hotkey Cheatsheet Link */}
+          <div className="text-center pb-2">
+            <button
+              id="btnHotkeyCheatsheet"
+              type="button"
+              onClick={() => {
+                if (onOpenHotkeyModal) {
+                  onOpenHotkeyModal();
+                } else {
+                  setIsHotkeyModalOpen(true);
+                }
+              }}
+              className="text-[11px] font-medium text-sky-500 hover:text-sky-400 hover:underline cursor-pointer inline-flex items-center gap-1.5 transition-colors py-1 px-2.5 rounded-md hover:bg-sky-500/10"
+              title="View all keyboard shortcuts (?)"
+            >
+              <Keyboard className="w-3.5 h-3.5" />
+              <span>Hotkey Cheatsheet (?)</span>
+            </button>
+          </div>
         </div>
       </aside>
+
+      {/* Hotkey Cheatsheet Modal */}
+      <HotkeyModal
+        isOpen={isHotkeyModalOpen}
+        onClose={() => setIsHotkeyModalOpen(false)}
+        theme={theme}
+      />
     </>
   );
 };
