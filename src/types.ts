@@ -8,21 +8,139 @@ export type SnapDirection =
   | 'isofl'
   | 'isofr';
 
+export type PullDirection = '+Y' | '-Y' | '+Z' | '-Z' | '+X' | '-X';
+
 export type MaterialKey =
   | 'original'
   | 'grey'
   | 'thickness'
+  | 'draft'
+  | 'balance'
   | 'custom'
   | 'normal'
   | 'wireframe'
   | 'sketch'
   | 'matcapZebra';
 
+export interface BalanceAnalysis {
+  isStable: boolean;
+  centerOfMass: { x: number; y: number; z: number };
+  centerOfMassInches: { x: number; y: number; z: number };
+  centerOfMassMm: { x: number; y: number; z: number };
+  cmHeightInches: number;
+  cmHeightMm: number;
+  contactPointCount: number;
+  stabilityMarginInches: number;
+  stabilityMarginMm: number;
+  groundY: number;
+  volumeCm3: number;
+  isWatertight: boolean;
+
+  // Z-Axis (Pitch / Forward-Backward Tipping) Breakdown
+  marginZOverallMm: number;
+  marginZOverallInches: number;
+  marginZFrontMm: number;
+  marginZFrontInches: number;
+  marginZBackMm: number;
+  marginZBackInches: number;
+  criticalPitchAngleDeg: number;
+  isZStable: boolean;
+  tippingZDirection?: 'forward' | 'backward' | 'none';
+
+  // X-Axis (Roll / Left-Right Tipping) Breakdown
+  marginXOverallMm: number;
+  marginXOverallInches: number;
+  marginXLeftMm: number;
+  marginXLeftInches: number;
+  marginXRightMm: number;
+  marginXRightInches: number;
+  criticalRollAngleDeg: number;
+  isXStable: boolean;
+  tippingXDirection?: 'left' | 'right' | 'none';
+
+  // Weakest tipping axis descriptor
+  limitingAxis: 'Z (Pitch)' | 'X (Roll)' | 'Balanced' | 'Unstable';
+
+  // 2D convex hull points on the ground plane (for synchronized 3D rendering)
+  hullPoints?: { x: number; z: number }[];
+  // Axis intersection endpoints on hull
+  crosshairs?: {
+    zFront: { x: number; z: number };
+    zBack: { x: number; z: number };
+    xLeft: { x: number; z: number };
+    xRight: { x: number; z: number };
+  };
+}
+
 export type ThemeMode = 'dark' | 'light';
 
 export type ResolutionOption = 1 | 2 | 3 | 4 | 5;
 
 export type VideoFormat = 'mp4' | 'webm';
+
+export type ExportAspectRatio = 'viewport' | '16:9' | '1:1' | '9:16';
+export type GifAspectRatio = ExportAspectRatio;
+
+export type VideoCompressionOption = 'high' | 'balanced' | 'compact';
+
+export interface VideoExportOptions {
+  format: VideoFormat;
+  aspectRatio: ExportAspectRatio;
+  resolution: 480 | 720 | 1080 | 2160;
+  duration: number;
+  fps: 15 | 24 | 30 | 60;
+  compression: VideoCompressionOption;
+  videoEasing: boolean;
+}
+
+export interface GifExportOptions {
+  aspectRatio: ExportAspectRatio;
+  resolution: 480 | 720 | 1080 | 2160;
+  duration: 2 | 3 | 4 | 6 | 8;
+  fps: 15 | 24 | 30;
+  looping: 'infinite' | 'once';
+  dithering: boolean;
+  background: 'viewport' | 'translucent';
+  easing?: boolean;
+}
+
+export type ViewExportId =
+  | 'current'
+  // 8 horizontal ring views
+  | 'rear_right'
+  | 'right'
+  | 'front_right'
+  | 'front'
+  | 'front_left'
+  | 'left'
+  | 'rear_left'
+  | 'back'
+  // top & bottom
+  | 'top'
+  | 'bottom'
+  // elevated / quarter views
+  | 'front_right_quarter'
+  | 'front_left_quarter'
+  | 'rear_right_quarter'
+  | 'rear_left_quarter';
+
+export interface CustomViewDefinition {
+  id: ViewExportId;
+  name: string;
+  shortLabel: string;
+  category: 'viewport' | 'ring' | 'pole' | 'quarter';
+}
+
+export type ImageExportMode = 'combine_image' | 'combine_pdf' | 'separate_images';
+
+export interface ImageExportConfig {
+  selectedViews?: ViewExportId[];
+  views?: ViewExportId[];
+  combineToOne: boolean;
+  exportMode?: ImageExportMode;
+  resolution: ResolutionOption;
+  destination: 'download' | 'drive';
+}
 
 // The 4 base categories are the procedural PMREM fallback's own presets; a real HDRI selection
 // from the manifest (see HdriManifestItem) can set this to any of the manifest's own ids too.
@@ -35,17 +153,46 @@ export interface HdriManifestItem {
   category?: 'Studio' | 'Outdoor' | 'Interior' | string;
 }
 
+export interface DimensionPoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface DimensionItem {
+  id: string;
+  p1: DimensionPoint;
+  p2: DimensionPoint;
+  distanceInches: number;
+  deltaXInches: number;
+  deltaYInches: number;
+  deltaZInches: number;
+  offset?: DimensionPoint;
+}
+
+export interface FeedbackItem {
+  id: string;
+  type: 'bug' | 'feature';
+  userName: string;
+  userEmail?: string;
+  text: string;
+  imageUri?: string;
+  timestamp: number;
+  completed: boolean;
+}
+
 export type AntialiasMode = 'none' | 'fxaa' | 'smaa';
+
+export type SSRQuality = 'off' | 'low' | 'medium' | 'high';
 
 export type ClipAxis = 'x' | 'y' | 'z';
 
 export interface ClippingPlaneSetting {
   enabled: boolean;
-  // Position offset as a percentage of the model's bounding box axis (-100% to +100%, where 0%
-  // is the center) — scale-independent, so the plane stays correctly placed across differently
-  // sized models. offsetInches is kept alongside it for display/legacy reference only.
+  // Position offset as a percentage of the model's bounding box axis (-100% to +100%, where 0% is the center)
   offsetPercent: number;
-  offsetInches: number;
+  // Position offset from origin, in inches, along the axis (for reference/compatibility)
+  offsetInches?: number;
   // Which side of the plane gets cut away
   flip: boolean;
 }
@@ -54,6 +201,10 @@ export interface ClippingSettings {
   x: ClippingPlaneSetting; // Left / Right
   y: ClippingPlaneSetting; // Top / Bottom
   z: ClippingPlaneSetting; // Front / Back
+  solidCaps?: boolean; // Enable / disable solid cross-section capping (default: true)
+  capOpacity?: number; // 0 to 1 (0% to 100%, default: 1.0)
+  capColor?: string; // Hex color for cross-section cap (default: '#e11d48')
+  capHatching?: boolean; // CAD diagonal cross-hatch pattern on cut surface (default: false)
 }
 
 // One entry per top-level separable part of the loaded model (batch-loaded files, or the
@@ -61,6 +212,20 @@ export interface ClippingSettings {
 export interface LoadedPart {
   name: string;
   visible: boolean;
+}
+
+export interface SelectedPartBounds {
+  index: number;
+  indices: number[];
+  name: string;
+  names: string[];
+  count: number;
+  wIn: number;
+  hIn: number;
+  dIn: number;
+  wMm: number;
+  hMm: number;
+  dMm: number;
 }
 
 export interface ModelDimensions {
@@ -115,6 +280,11 @@ export interface ViewerSettings {
   sketchHighlightColorHex: string;
   sketchShadowColorHex: string;
 
+  // Draft Angle Analysis (Tooling)
+  draftPullDirection: PullDirection;
+  draftSafeAngleDeg: number;
+  draftWarningAngleDeg: number;
+
   // Environment / lighting
   environmentPreset: EnvironmentPreset;
   // Rotates the HDR/PMREM environment map itself (independent of the key/fill directional
@@ -137,6 +307,7 @@ export interface ViewerSettings {
   ssaoRadius: number;
   ssaoIntensity: number;
   ssaoBias: number;
+  ssrQuality: SSRQuality;
 
   // Volume / cost estimate
   materialDensityGCm3: number;
@@ -149,6 +320,10 @@ export interface ViewerSettings {
   turntableDirection?: 'cw' | 'ccw';
   turntableSpeed?: 'slow' | 'normal' | 'fast';
   videoEasing?: boolean;
+
+  // Dimensioning (Tier 4)
+  dimensionsEnabled?: boolean;
+  dimensionUnit?: 'in' | 'mm';
 }
 
 export interface DriveFileItem {

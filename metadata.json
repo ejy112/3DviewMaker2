@@ -1,6 +1,6 @@
 {
-  "name": "3DViewMaker v1.08",
-  "description": "Interactive 3D model viewer and turnaround sheet generator with orthographic framing, turntable video recording, batch/exploded-view assemblies, extended LookDev materials, clipping planes, SSAO/AA post-processing, volume/cost estimation, and Google Drive integration.",
+  "name": "3DViewMaker v1.55",
+  "description": "Interactive 3D model viewer and turnaround sheet generator with automatic STL loose-part mesh splitting, orthographic framing, turntable video recording, vertex dimensioning, batch/exploded-view assemblies, extended LookDev materials with draft angle analysis and center of mass balance checking, cross-section capping with stencil solid caps, clipping planes, GTAO/AA post-processing, volume/cost estimation, and Google Drive integration.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
