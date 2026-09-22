@@ -9,6 +9,13 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
+# Claude Code sets CLAUDE_PROJECT_DIR for hooks, but fail loudly rather than letting
+# `set -u` abort with a bare "unbound variable" if anything ever invokes this without it.
+if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
+  echo "session-start.sh: CLAUDE_PROJECT_DIR is not set; cannot locate the repository." >&2
+  exit 1
+fi
+
 cd "$CLAUDE_PROJECT_DIR"
 
 # npm install (not ci) so the post-hook container snapshot can be reused across sessions.
